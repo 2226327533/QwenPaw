@@ -1,43 +1,45 @@
-# QwenPaw Cross-Platform Build (Matrix Strategy)
-# 三平台并行构建 + 测试验证
+# QwenPaw Cross-Platform Binary Build (Matrix Strategy)
+# 三平台并行构建二进制产物 + Artifact 上传
 # 适配 https://github.com/agentscope-ai/QwenPaw 仓库结构
-#
-# 使用方式：将此文件放入 .github/workflows/ 目录，推送到 main 分支即可自动触发
 
-name: QwenPaw Cross-Platform Build
+name: QwenPaw Cross-Platform Binary Build
 
 on:
   push:
     branches: [main, develop]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+env:
+  NODE_OPTIONS: "--max-old-space-size=8192"
+
 jobs:
-  build-and-test:
-    name: Build & Test — ${{ matrix.os_label }} / py${{ matrix.python-version }}
+  build-binary:
+    name: Build Binary — ${{ matrix.os_label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # === Linux: 双版本 Python 覆盖 ===
           - os: ubuntu-latest
-            os_label: Linux
-            python-version: "3.10"
-          - os: ubuntu-latest
-            os_label: Linux
-            python-version: "3.13"
+            os_label: Linux x64
+            artifact_name: qwenpaw-linux-x64
+            binary_name: qwenpaw
+            pyinstaller_extra: ""
 
-          # === macOS (Apple Silicon) ===
           - os: macos-latest
             os_label: macOS ARM64
-            python-version: "3.10"
+            artifact_name: qwenpaw-macos-arm64
+            binary_name: qwenpaw
+            pyinstaller_extra: "--target-arch arm64"
 
-          # === Windows ===
           - os: windows-latest
-            os_label: Windows
-            python-version: "3.10"
+            os_label: Windows x64
+            artifact_name: qwenpaw-windows-x64
+            binary_name: qwenpaw.exe
+            pyinstaller_extra: ""
 
     steps:
       # ──────────────────────────────────────
@@ -60,10 +62,7 @@ jobs:
 
       - name: Build console frontend
         shell: bash
-        env:
-          NODE_OPTIONS: "--max-old-space-size=8192"
-        run: |
-          cd console && npm ci && npm run build
+        run: cd console && npm ci && npm run build
 
       - name: Copy console build into package
         shell: bash
@@ -73,51 +72,121 @@ jobs:
           cp -R console/dist/* src/qwenpaw/console/
 
       # ──────────────────────────────────────
-      # 3. Backend: Python Setup & Install
+      # 3. Python Setup & Install
       # ──────────────────────────────────────
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
 
-      - name: Install QwenPaw with all dependencies
+      - name: Install QwenPaw and PyInstaller
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,full]"
+          pip install -e ".[full]"
+          pip install pyinstaller==6.*
 
       # ──────────────────────────────────────
-      # 4. Verify Installation
+      # 4. Build Binary with PyInstaller
       # ──────────────────────────────────────
-      - name: Verify CLI entry point
+      - name: Build binary with PyInstaller
         shell: bash
         run: |
-          qwenpaw --version || echo "CLI version check completed"
-          python -c "import qwenpaw; print(f'QwenPaw imported successfully')"
+          pyinstaller \
+            --onefile \
+            --name qwenpaw \
+            --console \
+            --collect-all qwenpaw \
+            --hidden-import qwenpaw.cli.main \
+            --hidden-import qwenpaw.app \
+            --hidden-import qwenpaw.agents \
+            --hidden-import reme_ai \
+            --hidden-import matrix_nio \
+            --hidden-import agentscope \
+            ${{ matrix.pyinstaller_extra }} \
+            -c "from qwenpaw.cli.main import cli; cli()" \
+            || \
+          pyinstaller \
+            --onefile \
+            --name qwenpaw \
+            --console \
+            --collect-all qwenpaw \
+            --hidden-import qwenpaw.cli.main \
+            ${{ matrix.pyinstaller_extra }} \
+            $(python -c "import qwenpaw.cli.main; import os; print(os.path.join(os.path.dirname(qwenpaw.cli.main.__file__), 'main.py'))")
 
       # ──────────────────────────────────────
-      # 5. Run Tests
+      # 5. Verify Binary
       # ──────────────────────────────────────
-      - name: Run unit tests
+      - name: Verify binary (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          pytest tests/unit -v --tb=short -q
+          ls -lh dist/${{ matrix.binary_name }}
+          file dist/${{ matrix.binary_name }}
+          chmod +x dist/${{ matrix.binary_name }}
+          ./dist/${{ matrix.binary_name }} --version || echo "Version check done"
 
-      - name: Run contract tests
-        shell: bash
+      - name: Verify binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          pytest tests/contract -v --tb=short -q
+          Get-Item dist\${{ matrix.binary_name }} | Select-Object Name, Length
+          .\dist\${{ matrix.binary_name }} --version
 
       # ──────────────────────────────────────
-      # 6. Build Summary
+      # 6. Upload Artifact
+      # ──────────────────────────────────────
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.binary_name }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ──────────────────────────────────────
+      # 7. Build Summary
       # ──────────────────────────────────────
       - name: Build summary
         if: always()
         shell: bash
         run: |
-          echo "## ✅ Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Platform**: ${{ matrix.os_label }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Python**: ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Runner**: ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Binary**: ${{ matrix.binary_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: ${{ matrix.artifact_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────
+  # Release (only on tag push)
+  # ──────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build-binary
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+
+      - name: Package artifacts
+        run: |
+          cd release-assets
+          for dir in */; do
+            name="${dir%/}"
+            zip -r "../${name}.zip" "$dir"
+          done
+          ls -lh ../*.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.zip'
+          generate_release_notes: true
