@@ -1,0 +1,182 @@
+# QwenPaw Bundle 构建流水线
+#
+# 基于 python-build-standalone 构建 QwenPaw 跨平台分发包。
+# 产物上传为 GitHub Actions artifacts，可进一步上传到 CDN/OSS。
+#
+# 触发方式:
+#   - Tag:     qwenpaw-bundle-v*
+#   - 手动:    workflow_dispatch（指定 QwenPaw 版本）
+#
+name: Build QwenPaw Bundle
+
+on:
+  push:
+    tags:
+      - 'qwenpaw-bundle-v*'
+  workflow_dispatch:
+    inputs:
+      qwenpaw_version:
+        description: 'QwenPaw version to bundle (e.g. 0.2.0, or "latest")'
+        required: true
+        default: 'latest'
+      python_date:
+        description: 'python-build-standalone release date (e.g. 20250528)'
+        required: true
+        default: '20250528'
+      python_version:
+        description: 'Python version (e.g. 3.12.10)'
+        required: true
+        default: '3.12.10'
+
+env:
+  PYTHON_DATE: ${{ github.event.inputs.python_date || '20250528' }}
+  PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.12.10' }}
+  QWENPAW_VERSION: ${{ github.event.inputs.qwenpaw_version || 'latest' }}
+
+jobs:
+  # ─── 构建（4 平台并行） ──────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: win-x64
+            python_url_suffix: x86_64-pc-windows-msvc-install_only_stripped.tar.gz
+
+          - os: macos-14
+            platform: mac-arm64
+            python_url_suffix: aarch64-apple-darwin-install_only_stripped.tar.gz
+
+          - os: macos-13
+            platform: mac-x64
+            python_url_suffix: x86_64-apple-darwin-install_only_stripped.tar.gz
+
+          - os: ubuntu-22.04
+            platform: linux-x64
+            python_url_suffix: x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute Python download URL
+        id: python-url
+        shell: bash
+        run: |
+          URL="https://github.com/astral-sh/python-build-standalone/releases/download/${{ env.PYTHON_DATE }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_DATE }}-${{ matrix.python_url_suffix }}"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Python URL: $URL"
+
+      - name: Build bundle
+        shell: bash
+        run: |
+          bash scripts/build-qwenpaw-bundle.sh "${{ matrix.platform }}" \
+            --python-url "${{ steps.python-url.outputs.url }}" \
+            --qwenpaw-version "${{ env.QWENPAW_VERSION }}" \
+            --output dist
+
+      - name: Show bundle contents
+        shell: bash
+        run: |
+          echo "=== dist/ contents ==="
+          ls -lh dist/
+          echo ""
+          echo "=== SHA256 ==="
+          cat dist/*.sha256 || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwenpaw-bundle-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 30
+
+  # ─── 汇总 & 生成 manifest ───────────────────────────────────────────────────
+  manifest:
+    name: Generate CDN manifest
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: |
+          echo "=== All artifacts ==="
+          find artifacts/ -type f | sort
+
+      - name: Generate manifest.json
+        run: |
+          VERSION="${{ env.QWENPAW_VERSION }}"
+          PYVER="${{ env.PYTHON_VERSION }}"
+
+          cat > manifest.json << MANIFEST_EOF
+          {
+            "version": "$VERSION",
+            "python_version": "$PYVER",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "win-x64": {
+                "file": "qwenpaw-bundle-win-x64.tar.gz",
+                "sha256": "$(cat artifacts/qwenpaw-bundle-win-x64.tar.gz.sha256 2>/dev/null | awk '{print $1}' || echo 'N/A')",
+                "size_mb": "$(du -sm artifacts/qwenpaw-bundle-win-x64.tar.gz 2>/dev/null | awk '{print $1}' || echo 'N/A')"
+              },
+              "mac-arm64": {
+                "file": "qwenpaw-bundle-mac-arm64.tar.gz",
+                "sha256": "$(cat artifacts/qwenpaw-bundle-mac-arm64.tar.gz.sha256 2>/dev/null | awk '{print $1}' || echo 'N/A')",
+                "size_mb": "$(du -sm artifacts/qwenpaw-bundle-mac-arm64.tar.gz 2>/dev/null | awk '{print $1}' || echo 'N/A')"
+              },
+              "mac-x64": {
+                "file": "qwenpaw-bundle-mac-x64.tar.gz",
+                "sha256": "$(cat artifacts/qwenpaw-bundle-mac-x64.tar.gz.sha256 2>/dev/null | awk '{print $1}' || echo 'N/A')",
+                "size_mb": "$(du -sm artifacts/qwenpaw-bundle-mac-x64.tar.gz 2>/dev/null | awk '{print $1}' || echo 'N/A')"
+              },
+              "linux-x64": {
+                "file": "qwenpaw-bundle-linux-x64.tar.gz",
+                "sha256": "$(cat artifacts/qwenpaw-bundle-linux-x64.tar.gz.sha256 2>/dev/null | awk '{print $1}' || echo 'N/A')",
+                "size_mb": "$(du -sm artifacts/qwenpaw-bundle-linux-x64.tar.gz 2>/dev/null | awk '{print $1}' || echo 'N/A')"
+              }
+            }
+          }
+          MANIFEST_EOF
+
+          echo "=== manifest.json ==="
+          cat manifest.json
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwenpaw-manifest
+          path: manifest.json
+          retention-days: 90
+
+      # ─── 可选：上传到 CDN / OSS ────────────────────────────────────────────
+      # 取消注释并配置 secrets 后启用
+      #
+      # - name: Upload to OSS
+      #   env:
+      #     OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+      #     OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+      #     OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+      #     OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      #   run: |
+      #     # 安装 ossutil
+      #     curl -o ossutil64 https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil64
+      #     chmod +x ossutil64
+      #     ./ossutil64 config -e "$OSS_ENDPOINT" -i "$OSS_ACCESS_KEY_ID" -k "$OSS_ACCESS_KEY_SECRET"
+      #     # 上传 bundle
+      #     for f in artifacts/qwenpaw-bundle-*.tar.gz; do
+      #       ./ossutil64 cp "$f" "oss://$OSS_BUCKET/qwenpaw/v${VERSION}/"
+      #     done
+      #     # 上传 manifest
+      #     ./ossutil64 cp manifest.json "oss://$OSS_BUCKET/qwenpaw/v${VERSION}/manifest.json"
