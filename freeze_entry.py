@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # freeze_entry.py — PyInstaller 专用入口
 # 用绝对导入避免 relative import 问题
 import os
@@ -11,8 +12,7 @@ else:
 if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
-# 绝对导入 — 使用 click CLI 入口
-from qwenpaw.cli.main import cli  # noqa: E402
+from qwenpaw.cli.main import cli  # noqa: E402  pylint: disable=C0413
 
 if __name__ == "__main__":
-    cli()
+    cli()  # pylint: disable=E1120
