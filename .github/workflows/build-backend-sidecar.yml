@@ -1,0 +1,142 @@
+# Build QwenPaw Backend Sidecar (Windows + macOS)
+#
+# 构建 qwenpaw-backend 双平台产物，供 Electron / Tauri 等桌面客户端嵌入。
+# 每个平台产出一个 qwenpaw-backend 目录（PyInstaller onedir 模式），
+# 包含 qwenpaw-backend 和 qwenpaw 两个可执行文件。
+#
+# 触发方式:
+#   - Tag:     v*
+#   - 手动:    workflow_dispatch
+#
+name: Build Backend Sidecar
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-sidecar:
+    name: Build Sidecar — ${{ matrix.os_label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os_label: Windows x64
+            artifact_name: qwenpaw-sidecar-windows-x64
+          - os: macos-latest
+            os_label: macOS ARM64
+            artifact_name: qwenpaw-sidecar-macos-arm64
+
+    steps:
+      # ──────────────────────────────────────
+      # 1. Checkout
+      # ──────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ──────────────────────────────────────
+      # 2. Build Console (required by qwenpaw.spec)
+      # ──────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Build console frontend
+        shell: bash
+        run: cd console && npm ci && npm run build
+
+      # ──────────────────────────────────────
+      # 3. Python + uv Setup
+      # ──────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      # ──────────────────────────────────────
+      # 4. Build PyInstaller Backend
+      # ──────────────────────────────────────
+      - name: Build backend (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -ErrorAction SilentlyContinue
+          ./scripts/pack-tauri/build_pyinstaller.ps1
+
+      - name: Build backend (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/pack-tauri/build_pyinstaller.sh
+
+      # ──────────────────────────────────────
+      # 5. Verify & Package
+      # ──────────────────────────────────────
+      - name: Verify build output (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $backend = "dist\pyinstaller\qwenpaw-backend"
+          if (-not (Test-Path "$backend\qwenpaw-backend.exe")) {
+            throw "qwenpaw-backend.exe not found"
+          }
+          if (-not (Test-Path "$backend\qwenpaw.exe")) {
+            throw "qwenpaw.exe not found"
+          }
+          $size = (Get-ChildItem $backend -Recurse -File |
+                   Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Bundle size: $([math]::Round($size, 2)) MB"
+
+      - name: Verify build output (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          BACKEND_DIR="dist/pyinstaller/qwenpaw-backend"
+          test -f "${BACKEND_DIR}/qwenpaw-backend" || { echo "qwenpaw-backend not found"; exit 1; }
+          test -f "${BACKEND_DIR}/qwenpaw" || { echo "qwenpaw not found"; exit 1; }
+          du -sh "${BACKEND_DIR}"
+
+      - name: Package sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\pyinstaller\qwenpaw-backend\* -DestinationPath dist\qwenpaw-sidecar-win-x64.zip
+
+      - name: Package sidecar (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cd dist/pyinstaller && zip -r "${{ github.workspace }}/dist/qwenpaw-sidecar-macos-arm64.zip" qwenpaw-backend/
+
+      # ──────────────────────────────────────
+      # 6. Upload Artifact
+      # ──────────────────────────────────────
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/qwenpaw-sidecar-*.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      # ──────────────────────────────────────
+      # 7. Build Summary
+      # ──────────────────────────────────────
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Sidecar Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform**: ${{ matrix.os_label }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: ${{ matrix.artifact_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
