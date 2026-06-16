@@ -41,6 +41,8 @@ jobs:
           cache-dependency-path: console/package-lock.json
 
       - name: Build console frontend
+        env:
+          NODE_OPTIONS: "--max-old-space-size=8192"
         run: |
           cd console && npm ci && npm run build
 

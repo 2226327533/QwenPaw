@@ -137,12 +137,18 @@ export default defineConfig(({ mode }) => {
             ) {
               return "react-vendor";
             }
-            // Ant Design + AgentScope design system (merged to avoid circular deps)
+            // Ant Design + AgentScope design system + UI utilities
+            // Merged into one chunk to avoid circular chunk deps between
+            // ui-vendor and utils-vendor (e.g. ahooks ↔ antd cross-refs).
             if (
               id.includes("node_modules/antd/") ||
               id.includes("node_modules/antd-style/") ||
               id.includes("node_modules/@ant-design/") ||
-              id.includes("node_modules/@agentscope-ai/")
+              id.includes("node_modules/@agentscope-ai/") ||
+              id.includes("node_modules/dayjs/") ||
+              id.includes("node_modules/zustand/") ||
+              id.includes("node_modules/ahooks/") ||
+              id.includes("node_modules/@vvo/tzdb/")
             ) {
               return "ui-vendor";
             }
@@ -169,15 +175,6 @@ export default defineConfig(({ mode }) => {
             // Drag and drop
             if (id.includes("node_modules/@dnd-kit/")) {
               return "dnd-vendor";
-            }
-            // Utilities (dayjs, zustand, ahooks, etc.)
-            if (
-              id.includes("node_modules/dayjs/") ||
-              id.includes("node_modules/zustand/") ||
-              id.includes("node_modules/ahooks/") ||
-              id.includes("node_modules/@vvo/tzdb/")
-            ) {
-              return "utils-vendor";
             }
           },
         },
