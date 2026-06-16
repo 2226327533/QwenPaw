@@ -105,16 +105,7 @@ jobs:
             --hidden-import matrix_nio \
             --hidden-import agentscope \
             ${{ matrix.pyinstaller_extra }} \
-            -c "from qwenpaw.cli.main import cli; cli()" \
-            || \
-          pyinstaller \
-            --onefile \
-            --name qwenpaw \
-            --console \
-            --collect-all qwenpaw \
-            --hidden-import qwenpaw.cli.main \
-            ${{ matrix.pyinstaller_extra }} \
-            $(python -c "import qwenpaw.cli.main; import os; print(os.path.join(os.path.dirname(qwenpaw.cli.main.__file__), 'main.py'))")
+            freeze_entry.py
 
       # ──────────────────────────────────────
       # 5. Verify Binary
