@@ -1,6 +1,6 @@
-# Build QwenPaw Backend Sidecar (Windows + macOS)
+# Build QwenPaw Backend Sidecar (Windows + macOS ARM64 + macOS x64)
 #
-# 构建 qwenpaw-backend 双平台产物，供 Electron / Tauri 等桌面客户端嵌入。
+# 构建 qwenpaw-backend 三平台产物，供 Electron / Tauri 等桌面客户端嵌入。
 # 每个平台产出一个 qwenpaw-backend 目录（PyInstaller onedir 模式），
 # 包含 qwenpaw-backend 和 qwenpaw 两个可执行文件。
 #
@@ -29,6 +29,11 @@ jobs:
           - os: macos-latest
             os_label: macOS ARM64
             artifact_name: qwenpaw-sidecar-macos-arm64
+            zip_name: qwenpaw-sidecar-macos-arm64
+          - os: macos-13
+            os_label: macOS x64
+            artifact_name: qwenpaw-sidecar-macos-x64
+            zip_name: qwenpaw-sidecar-macos-x64
 
     steps:
       # ──────────────────────────────────────
@@ -118,7 +123,7 @@ jobs:
       - name: Package sidecar (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: cd dist/pyinstaller && zip -r "${{ github.workspace }}/dist/qwenpaw-sidecar-macos-arm64.zip" qwenpaw-backend/
+        run: cd dist/pyinstaller && zip -r "${{ github.workspace }}/dist/${{ matrix.zip_name }}.zip" qwenpaw-backend/
 
       # ──────────────────────────────────────
       # 6. Upload Artifact
