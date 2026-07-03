@@ -1,0 +1,110 @@
+# Build QwenPaw Backend Sidecar — macOS x64 (Intel)
+#
+# 仅构建 macOS Intel (x64) 架构的 sidecar 产物。
+# 使用 macos-13 runner (GitHub Actions 上最后一个 Intel macOS runner)。
+#
+# 触发方式:
+#   - Tag:     v*
+#   - 手动:    workflow_dispatch
+#
+name: Build Sidecar macOS x64
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-macos-x64:
+    name: Build Sidecar — macOS x64
+    runs-on: macos-13
+
+    steps:
+      # ──────────────────────────────────────
+      # 1. Checkout
+      # ──────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ──────────────────────────────────────
+      # 2. Build Console (required by qwenpaw.spec)
+      # ──────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Build console frontend
+        shell: bash
+        env:
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: cd console && npm ci && npm run build
+
+      # ──────────────────────────────────────
+      # 3. Python + uv Setup
+      # ──────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      # ──────────────────────────────────────
+      # 4. Build PyInstaller Backend
+      # ──────────────────────────────────────
+      - name: Build backend
+        shell: bash
+        run: bash scripts/pack-tauri/build_pyinstaller.sh
+
+      # ──────────────────────────────────────
+      # 5. Verify & Package
+      # ──────────────────────────────────────
+      - name: Verify build output
+        shell: bash
+        run: |
+          BACKEND_DIR="dist/pyinstaller/qwenpaw-backend"
+          test -f "${BACKEND_DIR}/qwenpaw-backend" || { echo "qwenpaw-backend not found"; exit 1; }
+          test -f "${BACKEND_DIR}/qwenpaw" || { echo "qwenpaw not found"; exit 1; }
+          echo "Architecture check:"
+          file "${BACKEND_DIR}/qwenpaw-backend"
+          echo ""
+          echo "Bundle size:"
+          du -sh "${BACKEND_DIR}"
+
+      - name: Package sidecar zip
+        shell: bash
+        run: |
+          cd dist/pyinstaller
+          zip -r "${{ github.workspace }}/dist/qwenpaw-sidecar-macos-x64.zip" qwenpaw-backend/
+
+      # ──────────────────────────────────────
+      # 6. Upload Artifact
+      # ──────────────────────────────────────
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwenpaw-sidecar-macos-x64
+          path: dist/qwenpaw-sidecar-macos-x64.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      # ──────────────────────────────────────
+      # 7. Build Summary
+      # ──────────────────────────────────────
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Sidecar Build Summary — macOS x64" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform**: macOS x64 (Intel)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner**: macos-13" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: qwenpaw-sidecar-macos-x64.zip" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
