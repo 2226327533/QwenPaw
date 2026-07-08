@@ -79,6 +79,8 @@ jobs:
       - name: Build backend (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -ErrorAction SilentlyContinue
           ./scripts/pack-tauri/build_pyinstaller.ps1
@@ -86,6 +88,8 @@ jobs:
       - name: Build backend (macOS)
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/pack-tauri/build_pyinstaller.sh
 
       # ──────────────────────────────────────
