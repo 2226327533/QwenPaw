@@ -76,7 +76,7 @@ echo "Project dependencies installed with full extras"
 if ! "$PYTHON_BIN" -c "from acp import Agent" 2> /dev/null; then
     echo "Fixing agent-client-protocol namespace..."
     uninstall_python_package acp
-    install_python_packages agent-client-protocol
+    install_python_packages "agent-client-protocol>=0.9.0,<0.11.0"
 fi
 echo ""
 
@@ -135,6 +135,13 @@ cp -R "${BACKEND_DIR}/." "${DEST}/"
 chmod +x "${DEST}/qwenpaw-backend"
 chmod +x "${DEST}/qwenpaw"
 echo "Copied to: ${DEST}"
+echo ""
+
+# Stage a standalone CPython (same X.Y/arch as this build's interpreter) so the
+# frozen backend can install third-party plugin dependencies at runtime.
+echo "== Staging bundled Python runtime =="
+"$PYTHON_BIN" "${REPO_ROOT}/scripts/pack-tauri/stage_python_runtime.py" \
+    --dest "${BINARIES_DIR}/python-runtime"
 echo ""
 
 echo "========================================="

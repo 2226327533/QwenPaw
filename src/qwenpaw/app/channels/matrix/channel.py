@@ -59,7 +59,7 @@ from nio.responses import (
     WhoamiResponse,
 )
 
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from qwenpaw.schemas import (
     AudioContent,
     ContentType,
     FileContent,
@@ -209,6 +209,10 @@ class MatrixChannel(BaseChannel):
     channel = CHANNEL_KEY  # type: ignore[assignment]
     uses_manager_queue: bool = True
 
+    # Streaming constants — placeholder message + in-place edit
+    _STREAM_PLACEHOLDER = "..."
+    _STREAM_DELTA_MIN_INTERVAL_S: float = 1.0
+
     def __init__(
         self,
         process: Callable,
@@ -228,7 +232,9 @@ class MatrixChannel(BaseChannel):
         on_reply_sent: Optional[Callable] = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         filter_thinking: bool = False,
+        streaming_enabled: bool = False,
         workspace_dir: Path | None = None,
         access_control_dm: bool = False,
         access_control_group: bool = False,
@@ -240,7 +246,9 @@ class MatrixChannel(BaseChannel):
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
+            no_text_debounce=no_text_debounce,
             filter_thinking=filter_thinking,
+            streaming_enabled=streaming_enabled,
             access_control_dm=access_control_dm,
             access_control_group=access_control_group,
         )
@@ -302,6 +310,7 @@ class MatrixChannel(BaseChannel):
         on_reply_sent: Optional[Callable] = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         filter_thinking: bool = False,
         workspace_dir: Path | None = None,
     ) -> "MatrixChannel":
@@ -337,6 +346,8 @@ class MatrixChannel(BaseChannel):
             filter_thinking=(
                 filter_thinking or raw.get("filter_thinking", False)
             ),
+            no_text_debounce=no_text_debounce,
+            streaming_enabled=raw.get("streaming_enabled", False),
             workspace_dir=workspace_dir,
             access_control_dm=bool(raw.get("access_control_dm", False)),
             access_control_group=bool(raw.get("access_control_group", False)),
@@ -1908,26 +1919,31 @@ class MatrixChannel(BaseChannel):
         """Download mxc:// to a local file; return path or None."""
         if not mxc_url.startswith("mxc://"):
             return None
-        try:
-            rest = mxc_url[6:]  # strip "mxc://"
-            server, media_id = rest.split("/", 1)
-            url = (
-                f"{self.homeserver}/_matrix/media/v3/download"
-                f"/{server}/{media_id}"
+        if not self._client:
+            logger.warning(
+                "MatrixChannel: _download_mxc called without client",
             )
-            headers = {"Authorization": f"Bearer {self.access_token}"}
-            if not self._http_client:
-                logger.warning("MatrixChannel: HTTP client not initialized")
+            return None
+        try:
+            resp = await self._client.download(mxc=mxc_url)
+            from nio.responses import DownloadError
+
+            if isinstance(resp, DownloadError):
+                logger.warning(
+                    "MatrixChannel: failed to download mxc %s: %s %s",
+                    mxc_url,
+                    type(resp).__name__,
+                    getattr(resp, "message", ""),
+                )
                 return None
-            resp = await self._http_client.get(url, headers=headers)
-            resp.raise_for_status()
+
             dest = self._media_dir() / filename
-            dest.write_bytes(resp.content)
+            dest.write_bytes(resp.body)
             logger.debug("MatrixChannel: downloaded %s → %s", mxc_url, dest)
             return str(dest)
         except Exception as exc:
-            logger.warning(
-                "MatrixChannel: failed to download %s: %s",
+            logger.exception(
+                "MatrixChannel: unexpected error downloading %s: %s",
                 mxc_url,
                 exc,
             )
@@ -1949,29 +1965,23 @@ class MatrixChannel(BaseChannel):
         if not mxc_url.startswith("mxc://") or not self._client:
             return None
         try:
-            rest = mxc_url[6:]
-            server, media_id = rest.split("/", 1)
-            url = (
-                f"{self.homeserver}/_matrix/media/v3/download"
-                f"/{server}/{media_id}"
-            )
-            headers = {"Authorization": f"Bearer {self.access_token}"}
-            if not self._http_client:
-                logger.warning("MatrixChannel: HTTP client not initialized")
+            resp = await self._client.download(mxc=mxc_url)
+            from nio.responses import DownloadError
+
+            if isinstance(resp, DownloadError):
+                logger.warning(
+                    "MatrixChannel: failed to download encrypted %s: %s %s",
+                    mxc_url,
+                    type(resp).__name__,
+                    getattr(resp, "message", ""),
+                )
                 return None
-            resp = await self._http_client.get(url, headers=headers)
-            resp.raise_for_status()
 
             from nio.crypto.attachments import decrypt_attachment
 
             jwk_key = key.get("k", "")
             sha256_hash = hashes.get("sha256", "")
-            plaintext = decrypt_attachment(
-                resp.content,
-                jwk_key,
-                sha256_hash,
-                iv,
-            )
+            plaintext = decrypt_attachment(resp.body, jwk_key, sha256_hash, iv)
 
             dest = self._media_dir() / filename
             dest.write_bytes(plaintext)
@@ -1982,7 +1992,7 @@ class MatrixChannel(BaseChannel):
             )
             return str(dest)
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "MatrixChannel: failed to download encrypted %s: %s",
                 mxc_url,
                 exc,
@@ -2999,19 +3009,142 @@ class MatrixChannel(BaseChannel):
             )
 
     # ------------------------------------------------------------------
-    # Outgoing send — text
-    # Markdown→HTML (formatted_body); m.mentions when meta has sender_id.
+    # Streaming — placeholder message + in-place edit (MSC2676 m.replace)
     # ------------------------------------------------------------------
 
-    async def send(
+    def _get_stream_state(
+        self,
+        send_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Per-request streaming state stored in *send_meta*."""
+        state = send_meta.get("_matrix_stream")
+        if state is None:
+            state = {"event_ids": {}}
+            send_meta["_matrix_stream"] = state
+        return state
+
+    async def _edit_stream_message(
+        self,
+        room_id: str,
+        event_id: str,
+        text: str,
+    ) -> bool:
+        """Edit a previously sent message using MSC2676 ``m.replace``."""
+        if not self._client:
+            return False
+        html_body = _md_to_html(text)
+        content: dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": f"* {text}",
+            "format": "org.matrix.custom.html",
+            "formatted_body": f"* {html_body}",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": html_body,
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": event_id,
+            },
+        }
+        try:
+            await self._prepare_room_send(room_id)
+            await self._client.room_send(
+                room_id,
+                "m.room.message",
+                content,
+                ignore_unverified_devices=True,
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "MatrixChannel: stream edit failed for %s in %s",
+                event_id,
+                room_id,
+                exc_info=True,
+            )
+            return False
+
+    async def on_streaming_start(
+        self,
+        request: Any,
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        state = self._get_stream_state(send_meta)
+        event_id = await self._send_message(
+            to_handle,
+            self._STREAM_PLACEHOLDER,
+            send_meta,
+        )
+        if event_id:
+            state["event_ids"][stream_type] = event_id
+
+    async def on_streaming_delta(
+        self,
+        request: Any,
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        state = send_meta.get("_matrix_stream")
+        if not state:
+            return
+        event_id = state["event_ids"].get(stream_type)
+        if not event_id:
+            return
+        room_id = send_meta.get("room_id") or to_handle
+        await self._edit_stream_message(room_id, event_id, accumulated_text)
+
+    async def on_streaming_end(
+        self,
+        request: Any,
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        state = send_meta.get("_matrix_stream")
+        event_id = state["event_ids"].pop(stream_type, None) if state else None
+        room_id = send_meta.get("room_id") or to_handle
+
+        if not event_id or not accumulated_text:
+            if accumulated_text:
+                await self.send(to_handle, accumulated_text, send_meta)
+            return
+
+        success = await self._edit_stream_message(
+            room_id,
+            event_id,
+            accumulated_text,
+        )
+        if not success:
+            await self.send(to_handle, accumulated_text, send_meta)
+
+    # ------------------------------------------------------------------
+    # Outgoing send — text
+    # Markdown→HTML (formatted_body); m.mentions when meta has sender_id.
+    # Returns the event_id of the sent message, or None on failure.
+    # ------------------------------------------------------------------
+
+    async def _send_message(
         self,
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[str]:
+        """Internal send that returns the Matrix event_id (or None)."""
         if not self._client:
             logger.error("MatrixChannel: send called but client not ready")
-            return
+            return None
 
         room_id = (meta or {}).get("room_id") or to_handle
 
@@ -3024,7 +3157,7 @@ class MatrixChannel(BaseChannel):
                 room_id,
             )
             await self._send_typing(room_id, False)
-            return
+            return None
 
         html_body = _md_to_html(text)
         content: dict[str, Any] = {
@@ -3048,20 +3181,30 @@ class MatrixChannel(BaseChannel):
 
         try:
             await self._prepare_room_send(room_id)
-            await self._client.room_send(
+            resp = await self._client.room_send(
                 room_id,
                 "m.room.message",
                 content,
                 ignore_unverified_devices=True,
             )
+            return getattr(resp, "event_id", None)
         except Exception as exc:
             logger.exception(
                 "MatrixChannel: send failed to %s: %s",
                 room_id,
                 exc,
             )
+            return None
         finally:
             await self._send_typing(room_id, False)
+
+    async def send(
+        self,
+        to_handle: str,
+        text: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        await self._send_message(to_handle, text, meta)
 
     # ------------------------------------------------------------------
     # Outgoing send — media

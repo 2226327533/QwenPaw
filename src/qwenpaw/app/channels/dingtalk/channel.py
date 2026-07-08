@@ -31,7 +31,10 @@ from typing import (
 from uuid import uuid4
 from urllib.parse import unquote, urlparse
 
+import ssl
+
 import aiohttp
+import certifi
 import dingtalk_stream
 from dingtalk_stream import ChatbotMessage
 from alibabacloud_tea_openapi import models as open_api_models
@@ -67,7 +70,6 @@ from ..base import (
 from .constants import (
     AI_CARD_PROCESSING_TEXT,
     AI_CARD_RECOVERY_FINAL_TEXT,
-    AI_CARD_STREAM_MIN_INTERVAL_SECONDS,
     AI_CARD_TOKEN_PREEMPTIVE_REFRESH_SECONDS,
     DINGTALK_TOKEN_TTL_SECONDS,
 )
@@ -89,7 +91,7 @@ from .ai_card import (
 from .utils import guess_suffix_from_file_content
 
 if TYPE_CHECKING:
-    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+    from qwenpaw.schemas import AgentRequest
 
 # Short aliases for long SDK model names (≤79 chars)
 _GroupDeliverModel = (
@@ -117,6 +119,7 @@ class DingTalkChannel(BaseChannel):
     """
 
     channel = "dingtalk"
+    _STREAM_DELTA_MIN_INTERVAL_S = 0.3
 
     _NON_SERIALIZABLE_META_KEYS = ()
 
@@ -137,6 +140,7 @@ class DingTalkChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         dm_policy: str = "open",
         group_policy: str = "open",
         allow_from: Optional[List[str]] = None,
@@ -148,6 +152,7 @@ class DingTalkChannel(BaseChannel):
         streaming_enabled: bool = False,
         access_control_dm: bool = False,
         access_control_group: bool = False,
+        endpoint: str = "",
     ):
         # Streaming only makes sense for card mode (AI Card streaming updates).
         # For markdown mode, force streaming_enabled=False so base class
@@ -168,6 +173,7 @@ class DingTalkChannel(BaseChannel):
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
+            no_text_debounce=no_text_debounce,
             filter_thinking=filter_thinking,
             dm_policy=dm_policy,
             group_policy=group_policy,
@@ -191,6 +197,7 @@ class DingTalkChannel(BaseChannel):
         self.robot_code = robot_code or self.client_id
         self.card_auto_layout = card_auto_layout
         self.at_sender_on_reply = at_sender_on_reply
+        self.endpoint = (endpoint or "").strip().rstrip("/")
         self._workspace_dir = (
             Path(workspace_dir).expanduser() if workspace_dir else None
         )
@@ -288,6 +295,7 @@ class DingTalkChannel(BaseChannel):
                 "0",
             )
             == "1",
+            endpoint=os.getenv("DINGTALK_ENDPOINT", ""),
         )
 
     @classmethod
@@ -298,6 +306,7 @@ class DingTalkChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         filter_thinking: bool = False,
         workspace_dir: Path | None = None,
     ) -> "DingTalkChannel":
@@ -323,6 +332,7 @@ class DingTalkChannel(BaseChannel):
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
+            no_text_debounce=no_text_debounce,
             dm_policy=config.dm_policy or "open",
             group_policy=config.group_policy or "open",
             allow_from=config.allow_from or [],
@@ -344,6 +354,7 @@ class DingTalkChannel(BaseChannel):
             access_control_group=bool(
                 getattr(config, "access_control_group", False),
             ),
+            endpoint=getattr(config, "endpoint", ""),
         )
 
     # ---------------------------
@@ -1293,8 +1304,9 @@ class DingTalkChannel(BaseChannel):
         # Use oapi media upload (api.dingtalk.com upload returns 404).
         # Doc:
         # https://open.dingtalk.com/document/development/upload-media-files
+        oapi_base = self.endpoint or "https://oapi.dingtalk.com"
         url = (
-            "https://oapi.dingtalk.com/media/upload"
+            f"{oapi_base}/media/upload"
             f"?access_token={token}&type={media_type}"
         )
         ext = "jpg" if media_type == "image" else "bin"
@@ -2490,6 +2502,12 @@ class DingTalkChannel(BaseChannel):
         Drive DingTalkStreamClient.start() and stop when _stop_event is set.
         Closes client.websocket and cancels tasks to avoid "Task was destroyed
         but it is pending" on process exit.
+
+        Includes a liveness watchdog that detects system sleep/wake by
+        comparing wall-clock time elapsed vs expected interval.  On macOS,
+        asyncio timers freeze during sleep, so the SDK's built-in keepalive
+        may fail to detect a stale connection.  The watchdog forces a
+        reconnect when a time jump is detected.
         """
         client = self._client
         if not client:
@@ -2508,7 +2526,47 @@ class DingTalkChannel(BaseChannel):
                 main_task.cancel()
                 await asyncio.sleep(0.1)
 
+        async def liveness_watchdog() -> None:
+            """Detect system sleep/wake via wall-clock time jump.
+
+            If asyncio.sleep(30) actually takes >90s of real time, the
+            system likely just woke from sleep.  Force-close the websocket
+            so the SDK's while-True reconnect loop can trigger.
+
+            Does NOT break after detection — keeps monitoring so repeated
+            sleep/wake cycles are also covered (SDK reconnects internally
+            via its while-True loop without exiting main_task).
+            """
+            check_interval = 30
+            jump_threshold = 90  # 3x interval → definite sleep/wake
+            last_wall = time.time()
+            while not self._stop_event.is_set():
+                await asyncio.sleep(check_interval)
+                if self._stop_event.is_set():
+                    break
+                now = time.time()
+                elapsed = now - last_wall
+                last_wall = now
+                if elapsed > jump_threshold:
+                    logger.warning(
+                        "dingtalk: liveness watchdog detected "
+                        "wake-from-sleep (elapsed=%.0fs, "
+                        "expected~%ds); forcing reconnect...",
+                        elapsed,
+                        check_interval,
+                    )
+                    ws = client.websocket
+                    if ws is not None:
+                        try:
+                            await asyncio.wait_for(
+                                ws.close(),
+                                timeout=15,
+                            )
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+
         watcher_task = asyncio.create_task(stop_watcher())
+        watchdog_task = asyncio.create_task(liveness_watchdog())
         try:
             await main_task
         except asyncio.CancelledError:
@@ -2516,8 +2574,13 @@ class DingTalkChannel(BaseChannel):
         except Exception:
             logger.exception("dingtalk stream start() failed")
         watcher_task.cancel()
+        watchdog_task.cancel()
         try:
             await watcher_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await watchdog_task
         except asyncio.CancelledError:
             pass
         # Cancel remaining tasks (e.g. background_task) so loop exits cleanly
@@ -2563,6 +2626,34 @@ class DingTalkChannel(BaseChannel):
             "detail": "DingTalk stream client and HTTP session are active.",
         }
 
+    def _apply_custom_endpoint(self) -> None:
+        """Monkey-patch dingtalk_stream SDK modules to use a custom endpoint.
+
+        The SDK reads DINGTALK_OPENAPI_ENDPOINT at import time via
+        ``os.getenv`` and caches the value as module-level constants.
+        Each sub-module copies the value independently, so all must be
+        patched. This must be called before creating DingTalkStreamClient.
+        """
+        if not self.endpoint:
+            return
+
+        import dingtalk_stream.utils as _ds_utils
+        import dingtalk_stream.stream as _ds_stream
+        import dingtalk_stream.chatbot as _ds_chatbot
+        import dingtalk_stream.card_replier as _ds_card_replier
+
+        _ds_utils.DINGTALK_OPENAPI_ENDPOINT = self.endpoint
+        _ds_stream.DINGTALK_OPENAPI_ENDPOINT = self.endpoint
+        _ds_chatbot.DINGTALK_OPENAPI_ENDPOINT = self.endpoint
+        _ds_card_replier.DINGTALK_OPENAPI_ENDPOINT = self.endpoint
+        _ds_stream.DingTalkStreamClient.OPEN_CONNECTION_API = (
+            f"{self.endpoint}/v1.0/gateway/connections/open"
+        )
+        logger.info(
+            "dingtalk: custom endpoint applied: %s",
+            self.endpoint,
+        )
+
     async def start(self) -> None:
         if not self.enabled:
             logger.debug("disabled by env DINGTALK_CHANNEL_ENABLED=0")
@@ -2578,6 +2669,8 @@ class DingTalkChannel(BaseChannel):
             )
 
         self._loop = asyncio.get_running_loop()
+
+        self._apply_custom_endpoint()
 
         credential = dingtalk_stream.Credential(
             self.client_id,
@@ -2605,12 +2698,16 @@ class DingTalkChannel(BaseChannel):
         )
         self._stream_thread.start()
         if self._http is None:
-            self._http = aiohttp.ClientSession()
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            self._http = aiohttp.ClientSession(connector=connector)
 
         # Initialize DingTalk OpenAPI SDK clients
         sdk_config = open_api_models.Config()
         sdk_config.protocol = "https"
         sdk_config.region_id = "central"
+        if self.endpoint:
+            sdk_config.endpoint = self.endpoint
         self._oauth_sdk = dingtalk_oauth_client.Client(sdk_config)
         self._robot_sdk = dingtalk_robot_client.Client(sdk_config)
         self._card_sdk = dingtalk_card_client.Client(sdk_config)
@@ -3058,12 +3155,6 @@ class DingTalkChannel(BaseChannel):
         now_ms = int(time.time() * 1000)
         if not finalize:
             if content == (card.last_streamed_content or "").strip():
-                return False
-            if (
-                card.last_updated
-                and (now_ms - card.last_updated)
-                < AI_CARD_STREAM_MIN_INTERVAL_SECONDS * 1000
-            ):
                 return False
 
         if (

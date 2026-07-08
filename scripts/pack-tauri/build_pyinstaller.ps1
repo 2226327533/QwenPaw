@@ -138,7 +138,7 @@ Write-Host "Project dependencies installed with full extras" -ForegroundColor Gr
 if (-not (Test-PythonImport "from acp import Agent")) {
     Write-Host "Fixing agent-client-protocol namespace..."
     Uninstall-PythonPackage "acp"
-    Install-PythonPackages -Packages @("agent-client-protocol")
+    Install-PythonPackages -Packages @("agent-client-protocol>=0.9.0,<0.11.0")
     Write-Host "agent-client-protocol installed" -ForegroundColor Green
 }
 
@@ -199,6 +199,14 @@ New-Item -ItemType Directory -Force -Path $DEST | Out-Null
 Get-ChildItem -LiteralPath $DEST -Force | Remove-Item -Recurse -Force
 Copy-Item -Recurse -Force (Join-Path $BACKEND_DIR "*") $DEST
 Write-Host "Copied to: $DEST" -ForegroundColor Green
+Write-Host ""
+
+# Stage a standalone CPython (same X.Y/arch as this build's interpreter) so the
+# frozen backend can install third-party plugin dependencies at runtime.
+Write-Host "== Staging bundled Python runtime ==" -ForegroundColor Yellow
+& $PYTHON_BIN (Join-Path $REPO_ROOT "scripts\pack-tauri\stage_python_runtime.py") `
+    --dest (Join-Path $BINARIES_DIR "python-runtime")
+Assert-LastExit "Failed to stage bundled Python runtime"
 Write-Host ""
 
 Write-Host "=========================================" -ForegroundColor Cyan

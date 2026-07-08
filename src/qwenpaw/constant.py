@@ -115,6 +115,17 @@ KEYRING_ACCOUNT_ENV = "QWENPAW_KEYRING_ACCOUNT"
 
 PROJECT_NAME = "QwenPaw"
 
+# Message metadata tags shared across agent middleware and memory managers.
+QWENPAW_MESSAGE_TAG_KEY = "qwenpaw_tag"
+AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY = "auto_memory_search_block_ids"
+AUTO_CONTINUE_MESSAGE_TAG = "auto_continue"
+AUTO_MEMORY_SEARCH_TEXT = (
+    "I'll check memory for relevant context before answering."
+)
+AUTO_MEMORY_SEARCH_THINKING_PREFIX = (
+    "I should search long-term memory before answering."
+)
+
 # Subdirectory name inside each agent's workspace that holds cloned / imported
 # coding projects.
 # Full path = <workspace_dir> / CODING_PROJECT_SUBDIR / <name>
@@ -189,6 +200,8 @@ CONFIG_FILE = EnvVarLoader.get_str("QWENPAW_CONFIG_FILE", "config.json")
 HEARTBEAT_FILE = EnvVarLoader.get_str("QWENPAW_HEARTBEAT_FILE", "HEARTBEAT.md")
 HEARTBEAT_DEFAULT_EVERY = "6h"
 HEARTBEAT_DEFAULT_TARGET = "main"
+HEARTBEAT_DEFAULT_TIMEOUT_SECONDS = 300
+HEARTBEAT_MAX_TIMEOUT_SECONDS = 3600
 HEARTBEAT_TARGET_LAST = "last"
 HEARTBEAT_TARGET_INBOX = "inbox"
 
@@ -201,6 +214,10 @@ MAX_LOAD_HISTORY_COUNT = 10000
 
 # Env key for app log level (used by CLI and app load for reload child).
 LOG_LEVEL_ENV = "QWENPAW_LOG_LEVEL"
+
+# Fixed desktop backend port. When set, get_stable_port() uses this port
+# instead of auto-assigning.
+QWENPAW_DESKTOP_PORT = _get_env("QWENPAW_DESKTOP_PORT")
 
 # Env to indicate running inside a container (e.g. Docker). Set to 1/true/yes.
 RUNNING_IN_CONTAINER = EnvVarLoader.get_bool(
@@ -238,9 +255,6 @@ BACKUP_DIR = (
     .resolve()
 )
 
-# Custom channel modules (installed via `qwenpaw channels install`); manager
-# loads BaseChannel subclasses from here.
-CUSTOM_CHANNELS_DIR = WORKING_DIR / "custom_channels"
 
 # Plugin directory (installed via `qwenpaw plugin install`)
 PLUGINS_DIR = WORKING_DIR / "plugins"
@@ -350,6 +364,7 @@ try:
     )
 except (TypeError, ValueError):
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = 300.0
+
 
 # Tool guard approval heartbeat interval (seconds).
 # Sends periodic heartbeat messages during approval wait to keep SSE

@@ -1312,6 +1312,127 @@ After configuration, start a call from your SIP phone or browser:
 
 ---
 
+## Slack
+
+### Create the Slack App
+
+1. Go to [https://api.slack.com/apps](https://api.slack.com/apps), click **Create New App** → **From a manifest**.
+
+   ![Create App from manifest](https://img.alicdn.com/imgextra/i2/O1CN01K6LQ851dgsjSspFNi_!!6000000003766-2-tps-1760-1043.png)
+
+2. Select the workspace you want to install the app to, then paste the following manifest (JSON format):
+
+> **Tip:** You can change `name` and `display_name` to your preferred bot name before pasting.
+
+```json
+{
+  "display_information": {
+    "name": "Demo App"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Demo App",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "files:read",
+        "files:write",
+        "im:history",
+        "mpim:history",
+        "channels:history",
+        "groups:history",
+        "app_mentions:read",
+        "users:read",
+        "commands"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
+```
+
+![Paste JSON config](https://img.alicdn.com/imgextra/i1/O1CN01XtgiMy1IkuHXafxzg_!!6000000000932-2-tps-1765-1046.png)
+
+3. Review the summary and click **Create**.
+
+   ![Manifest review](https://img.alicdn.com/imgextra/i3/O1CN01M076Oa1OmdTIpshdZ_!!6000000001748-2-tps-1758-1042.png)
+
+4. In **Features → App Home**, check **"Allow users to send Slash commands and messages from the messages tab"**.
+
+   ![App Home Messages Tab](https://img.alicdn.com/imgextra/i2/O1CN01wvaTja1qARggWd6RB_!!6000000005455-2-tps-1752-1044.png)
+
+### Get Tokens
+
+After the app is created, you need two tokens:
+
+1. **App-Level Token** — In **Settings → Basic Information**, scroll to **App-Level Tokens**, click **Generate Token and Scopes**, add the `connections:write` scope, and copy the token (starts with `xapp-`).
+
+   ![Generate App Token](https://img.alicdn.com/imgextra/i4/O1CN01OGk6GU1zpVk1zp8Ua_!!6000000006763-2-tps-1793-1079.png)
+
+2. **Bot Token** — In **Settings → Install App**, click **Install to Workspace**, authorize, then copy the **Bot User OAuth Token** (starts with `xoxb-`).
+
+   ![Install App](https://img.alicdn.com/imgextra/i1/O1CN01AjFgQN1al3UjLne0H_!!6000000003369-2-tps-1790-1080.png)
+
+3. Invite the bot to each channel by typing `/invite @YourBotName` in Slack.
+
+### Configure the Bot
+
+You can configure via the Console UI or by editing the agent workspace `agent.json`.
+
+**Method 1:** Configure in the Console
+
+Go to **Control → Channels**, click **Slack**, and enter the **Bot Token** and **App Token** you obtained.
+
+**Method 2:** Edit agent workspace `agent.json`
+
+Find `channels.slack` in your agent's `agent.json` (e.g., `~/.qwenpaw/workspaces/default/agent.json`) and fill in the fields:
+
+```json
+"slack": {
+    "enabled": true,
+    "bot_token": "xoxb-your-bot-token-here",
+    "app_token": "xapp-your-app-token-here",
+    "proxy": "",
+    "streaming_enabled": false
+}
+```
+
+**Slack-specific fields:**
+
+| Field               | Type   | Default         | Description                                                                 |
+| ------------------- | ------ | --------------- | --------------------------------------------------------------------------- |
+| `bot_token`         | string | `""` (required) | Slack Bot User OAuth Token, starts with `xoxb-`                             |
+| `app_token`         | string | `""` (required) | Slack App-Level Token for Socket Mode, starts with `xapp-`                  |
+| `proxy`             | string | `""`            | HTTP proxy URL for connecting to Slack API (e.g., `http://127.0.0.1:18118`) |
+| `streaming_enabled` | bool   | `false`         | Enable incremental message rendering via chat.update edits                  |
+
+### Notes
+
+- QwenPaw magic commands (e.g., `/stop`, `/model list`) can be sent as native Slack slash commands. You can also type them as plain messages — just prefix with a space (` /stop`) to bypass Slack's slash-command interception in threads.
+- If you change scopes or event subscriptions later, you **must reinstall the app** for the changes to take effect.
+- To control who can interact with the bot, use the access control fields (`access_control_dm`, `access_control_group`). Slack uses **Member IDs** (e.g., `U01ABC2DEF3`) for user identification — find them via profile → ⋮ → Copy member ID.
+- You can add more slash commands in the manifest's `slash_commands` array to register additional magic commands (e.g., `/stop`, `/status`).
+
 ## Appendix
 
 ### Config overview
@@ -1326,6 +1447,7 @@ After configuration, start a call from your SIP phone or browser:
 | Telegram   | telegram   | bot_token; optional http_proxy, http_proxy_auth                                                            |
 | Mattermost | mattermost | url, bot_token; optional show_typing, thread_follow_without_mention                                        |
 | Matrix     | matrix     | homeserver, user_id, access_token                                                                          |
+| Slack      | slack      | bot_token, app_token; optional proxy, streaming_enabled                                                    |
 | WeCom      | wecom      | bot_id, secret; optional media_dir, max_reconnect_attempts                                                 |
 | WeChat     | wechat     | bot_token (or QR login); optional bot_token_file, base_url, media_dir                                      |
 | XiaoYi     | xiaoyi     | ak, sk, agent_id; optional ws_url                                                                          |
@@ -1363,7 +1485,8 @@ done). **✗** = not supported (not possible on this channel).
 | ---------- | --------- | ---------- | ---------- | ---------- | --------- | --------- | ---------- | ---------- | ---------- | --------- |
 | DingTalk   | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
 | Feishu     | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
-| Discord    | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | 🚧         | 🚧         | 🚧         | 🚧        |
+| Discord    | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
+| Slack      | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
 | iMessage   | ✓         | ✗          | ✗          | ✗          | ✗         | ✓         | ✗          | ✗          | ✗          | ✗         |
 | QQ         | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
 | WeCom      | ✓         | ✓          | ✓          | ✓          | ✓         | ✓         | ✓          | ✓          | ✓          | ✓         |
@@ -1384,6 +1507,7 @@ Notes:
   `feishu_chat_id` and `feishu_message_id` for group context and dedup.
 - **Discord**: Attachments are parsed as image / video / audio / file for the
   agent; sending real media is 🚧 (currently link-only in reply).
+- **Slack**: Supports all file types natively — images, audio, video, PDFs, and arbitrary files. Uploaded files are automatically downloaded and processed as multimodal input; sending supports all media types via `files.uploadV2`.
 - **iMessage**: imsg + database polling; text only; attachments are ✗ (not
   possible on this channel).
 - **QQ**: Receiving attachments as multimodal and sending real media are 🚧;
@@ -1414,14 +1538,14 @@ To add a new platform (e.g. WeCom, Slack), implement a subclass of **BaseChannel
 
 ### Data flow and queue
 
-- **ChannelManager** keeps one queue per channel that uses it. When a message arrives, the channel calls **`self._enqueue(payload)`** (injected by the manager at startup); the manager’s consumer loop then calls **`channel.consume_one(payload)`**.
-- The base class implements a **default `consume_one`**: turn payload into `AgentRequest`, run `_process`, call `send_message_content` for each completed message, and `_on_consume_error` on failure. Most channels only need to implement “incoming → request” and “response → outgoing”; they do not override `consume_one`.
+- **ChannelManager** keeps one queue per channel that uses it. When a message arrives, the channel calls **`self._enqueue(payload)`** (injected by the manager at startup); the manager's consumer loop then calls **`channel.consume_one(payload)`**.
+- The base class implements a **default `consume_one`**: turn payload into `AgentRequest`, run `_process`, call `send_message_content` for each completed message, and `_on_consume_error` on failure. Most channels only need to implement "incoming → request" and "response → outgoing"; they do not override `consume_one`.
 
 ### Subclass must implement
 
 | Method                                                  | Purpose                                                                                                                                                            |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `build_agent_request_from_native(self, native_payload)` | Convert the channel’s native message to `AgentRequest` (using runtime `Message` / `TextContent` / `ImageContent` etc.) and set `request.channel_meta` for sending. |
+| `build_agent_request_from_native(self, native_payload)` | Convert the channel's native message to `AgentRequest` (using runtime `Message` / `TextContent` / `ImageContent` etc.) and set `request.channel_meta` for sending. |
 | `from_env` / `from_config`                              | Build instance from environment or config.                                                                                                                         |
 | `async start()` / `async stop()`                        | Lifecycle (connect, subscribe, cleanup).                                                                                                                           |
 | `async send(self, to_handle, text, meta=None)`          | Send one text (and optional attachments).                                                                                                                          |
@@ -1539,97 +1663,39 @@ def build_agent_request_from_native(self, native_payload):
     return request
 ```
 
-### Custom channel directory and CLI
+### Adding custom channels via plugins
 
-- **Directory**: Channels under the working dir at `custom_channels/` (default `~/.qwenpaw/custom_channels/`) are loaded at runtime. The manager scans `.py` files and packages (subdirs with `__init__.py`), loads `BaseChannel` subclasses, and registers them by the class’s `channel` attribute.
-- **Install**: `qwenpaw channels install <key>` creates a template `<key>.py` in `custom_channels/` for you to edit, or use `--path <local path>` / `--url <URL>` to copy a channel module from disk or the web. `qwenpaw channels add <key>` does the same and also adds a default entry to config (with optional `--path`/`--url`).
-- **Remove**: `qwenpaw channels remove <key>` deletes that channel’s module from `custom_channels/` (custom channels only; built-ins cannot be removed). By default it also removes the key from `channels` in `config.json`; use `--keep-config` to leave config unchanged.
-- **Config**: `ChannelConfig` uses `extra="allow"`, so any channel key can appear under `channels` in `config.json`. Use `qwenpaw channels config` for interactive setup or edit config by hand.
+Custom channels are now registered through the **plugin system**. See the
+[Plugin System — Example 8: Register a Custom Channel](./plugins) for a
+complete tutorial.
 
-### HTTP route registration
+To add a custom channel:
 
-For channels that require webhook callbacks (e.g., WeChat, Slack, LINE), you can register custom HTTP routes by exporting a `register_app_routes` callable in your module — no changes to QwenPaw's core source required.
+1. Create a plugin with `type: "channel"` in `plugin.json`
+2. Implement a `BaseChannel` subclass with a unique `channel` class attribute
+3. Call `api.register_channel(...)` in your plugin's `register()` method
+4. Install with `qwenpaw plugin install <path>`
 
-At startup, QwenPaw scans modules in `custom_channels/` for a `register_app_routes` export. If found, it is called with the FastAPI `app` instance, allowing the channel to register any routes it needs.
+Plugin channels appear in the Console UI alongside built-in channels, with
+full support for enable/disable, config fields, and access control.
 
-**Route prefix behavior**:
+For channels that need webhook HTTP endpoints, use `api.register_http_router()`
+in the same plugin to mount routes under `/api`.
 
-| Prefix      | Behavior                                   |
-| ----------- | ------------------------------------------ |
-| `/api/`     | Silent registration                        |
-| Other paths | Prints a warning at startup (non-blocking) |
-
-**Interface — `register_app_routes(app)`**
-
-- **Parameter**: `app` — FastAPI application instance
-- **Returns**: None
-- **Scope**: Register routes, middleware, or startup/shutdown events
-- **Error isolation**: A single channel's registration failure does not affect other channels
-
-**Minimal example — Echo channel**:
-
-```
-<workspace>/
-└── custom_channels/
-    └── my_echo/
-        └── __init__.py
-```
-
-```python
-# custom_channels/my_echo/__init__.py
-from qwenpaw.app.channels.base import BaseChannel
-
-class MyEchoChannel(BaseChannel):
-    """A minimal channel that echoes messages back."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    async def _listen(self):
-        pass  # Receive messages via HTTP callback
-
-    async def _send(self, target, content, **kwargs):
-        self.logger.info(f"Would send to {target}: {content}")
-
-
-def register_app_routes(app):
-    """Register HTTP routes for this channel."""
-
-    @app.post("/api/my-echo/callback")
-    async def echo_callback(request):
-        """Webhook entry point."""
-        body = await request.json()
-
-        from qwenpaw.app.channels.base import TextContent
-        channel = MyEchoChannel()
-        channel.enqueue_user_message(
-            user_id=body.get("user_id", "anonymous"),
-            session_id=body.get("session_id", "default"),
-            content=[TextContent(type="text", text=body.get("text", ""))],
-        )
-
-        return {"status": "ok"}
-```
-
-```json
-{
-  "channels": {
-    "my_echo": {
-      "enabled": true
-    }
-  }
-}
-```
-
-Test after startup:
-
-```bash
-curl -X POST http://localhost:8088/api/my-echo/callback \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "test", "session_id": "test", "text": "Hello!"}'
-```
-
-**Real-world example**: WeChat ClawBot integration ([PR #2140](https://github.com/agentscope-ai/QwenPaw/pull/2140), [Issue #2043](https://github.com/agentscope-ai/QwenPaw/issues/2043)) uses this mechanism to register the `/api/wechat/callback` route with Tencent's official SDK for message delivery.
+> **Migration from `custom_channels/`**: The legacy `custom_channels/`
+> directory and `qwenpaw channels install/add/remove` CLI commands have been
+> removed. If you have existing custom channels under `custom_channels/`,
+> migrate them to the plugin system:
+>
+> 1. Create a plugin directory with `plugin.json` (set `"type": "channel"`)
+> 2. Move your `BaseChannel` subclass into the plugin directory
+> 3. Create a `plugin.py` that calls `api.register_channel(...)` with your
+>    channel class and `config_fields`
+> 4. If your channel used `register_app_routes(app)`, replace it with
+>    `api.register_http_router(router, prefix="/your-channel")` using a
+>    FastAPI `APIRouter`
+> 5. Install the plugin: `qwenpaw plugin install <path>`
+> 6. Remove the old module from `custom_channels/`
 
 ---
 

@@ -1,19 +1,33 @@
 # -*- coding: utf-8 -*-
 """Abstract base class for memory managers."""
 import asyncio
+import json
 import logging
+import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from agentscope.message import Msg
-from agentscope.tool import ToolResponse
+from agentscope.message import AssistantMsg, Msg, TextBlock, ThinkingBlock
+from agentscope.message import ToolCallBlock, ToolCallState
+from agentscope.message import ToolResultBlock, ToolResultState
+from agentscope.message import Usage
+from agentscope.middleware import MiddlewareBase
+from agentscope.tool import ToolChunk
 
+from ...constant import (
+    AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY,
+    AUTO_MEMORY_SEARCH_TEXT,
+    AUTO_MEMORY_SEARCH_THINKING_PREFIX,
+)
 from ..utils.registry import Registry
 
 logger = logging.getLogger(__name__)
+AUTO_MEMORY_TURN_STATE_TTL_SECONDS = 24 * 60 * 60
+MAX_QUERY_CHARS = 50
 
 
 class BaseMemoryManager(ABC):
@@ -34,6 +48,7 @@ class BaseMemoryManager(ABC):
         self.working_dir: str = working_dir
         self.agent_id: str = agent_id
         self._summary_task_info: dict[str, dict[str, Any]] = {}
+        self._auto_memory_turn_states: dict[str, dict[str, Any]] = {}
         self._task_counter: int = 0
         self._task_queue: asyncio.Queue[
             tuple[str, list[Msg], dict]
@@ -53,28 +68,174 @@ class BaseMemoryManager(ABC):
         """
 
     @abstractmethod
-    def get_memory_prompt(self, language: str = "zh") -> str:
+    def get_memory_prompt(self) -> str:
         """Return the memory guidance prompt for inclusion
         in the system prompt.
-
-        Args:
-            language: Language code (``"zh"`` or ``"en"``).
 
         Returns:
             Formatted memory guidance string.
         """
 
     @abstractmethod
-    def list_memory_tools(self) -> list[Callable[..., ToolResponse]]:
+    def list_memory_tools(self) -> list[Callable[..., ToolChunk]]:
         """Return tool functions exposed to the agent for memory access.
 
         Each returned callable may have any signature but must return a
-        ``ToolResponse``.  Implementations register whatever memory-related
+        ``ToolChunk``.  Implementations register whatever memory-related
         tools make sense for the backend (e.g. semantic search, listing).
 
         Returns:
             Ordered list of tool functions to register with the agent toolkit.
         """
+
+    def build_middlewares(self) -> list[MiddlewareBase]:
+        """Return AgentScope middlewares contributed by this manager.
+
+        Tool registration remains a toolkit construction concern.  This hook
+        is only for prompt/model-call/reply lifecycle behavior.
+        """
+        from ..middlewares import MemoryMiddleware
+
+        return [MemoryMiddleware(memory_manager=self)]
+
+    def get_memory_config(self) -> Any:
+        """Return backend-specific memory configuration.
+
+        The shared memory middleware uses this hook for optional lifecycle
+        controls without depending on a concrete backend's config path.
+        """
+        return None
+
+    def get_auto_memory_interval(self) -> int:
+        """Return the lifecycle auto-memory interval for this backend.
+
+        ``0`` disables middleware-driven periodic auto-memory. Backends that
+        support automatic persistence should override this with their own
+        configuration or fixed cadence.
+        """
+        return 0
+
+    def get_auto_memory_turn_state(self, session_id: str) -> dict[str, Any]:
+        """Return persistent auto-memory turn tracking state for a session."""
+        now = time.monotonic()
+        expired_before = now - AUTO_MEMORY_TURN_STATE_TTL_SECONDS
+        for state_key, state in list(self._auto_memory_turn_states.items()):
+            touched_at = float(state.get("touched_at") or 0)
+            if touched_at < expired_before:
+                self._auto_memory_turn_states.pop(state_key, None)
+
+        key = session_id or "__default__"
+        state = self._auto_memory_turn_states.setdefault(
+            key,
+            {
+                "pending": [],
+                "seen": {},
+                "touched_at": now,
+            },
+        )
+        state["touched_at"] = now
+        return state
+
+    def _build_auto_memory_search_msg(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        text: str,
+    ) -> Msg:
+        """Build the simulated assistant tool interaction for memory search."""
+        tool_call_id = uuid.uuid4().hex
+        tool_input = {
+            "query": query,
+            "max_results": max_results,
+        }
+        thinking_text = (
+            f"{AUTO_MEMORY_SEARCH_THINKING_PREFIX} I will use the "
+            f"memory_search with the user's query as the search keywords, "
+            f"request up to {max_results} result"
+            f"{'' if max_results == 1 else 's'}."
+        )
+        text_block = TextBlock(text=AUTO_MEMORY_SEARCH_TEXT)
+        thinking_block = ThinkingBlock(thinking=thinking_text)
+        tool_call_block = ToolCallBlock(
+            id=tool_call_id,
+            name="memory_search",
+            input=json.dumps(tool_input, ensure_ascii=False),
+            state=ToolCallState.FINISHED,
+        )
+        tool_result_block = ToolResultBlock(
+            id=tool_call_id,
+            name="memory_search",
+            output=[TextBlock(text=text)],
+            state=ToolResultState.SUCCESS,
+        )
+        estimate_divisor = self._get_token_estimate_divisor()
+        estimated_input_tokens = sum(
+            self._estimate_message_text_tokens(part, estimate_divisor)
+            for part in (
+                AUTO_MEMORY_SEARCH_TEXT,
+                thinking_text,
+                tool_call_block.name + tool_call_block.input,
+                tool_result_block.name + text,
+            )
+        )
+        # Keep a synthetic sender to avoid merging into the real agent reply.
+        return AssistantMsg(
+            name="memory_search",
+            metadata={
+                AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY: [
+                    text_block.id,
+                    thinking_block.id,
+                    tool_call_block.id,
+                    tool_result_block.id,
+                ],
+                "auto_memory_search_usage": {
+                    "estimated": True,
+                    "input_tokens": estimated_input_tokens,
+                    "output_tokens": 0,
+                    "estimate_divisor": estimate_divisor,
+                },
+            },
+            content=[
+                text_block,
+                thinking_block,
+                tool_call_block,
+                tool_result_block,
+            ],
+            usage=Usage(
+                input_tokens=estimated_input_tokens,
+                output_tokens=0,
+            ),
+        )
+
+    def _get_token_estimate_divisor(self) -> float:
+        """Return configured byte/token divisor for lightweight estimates."""
+        try:
+            from ...config.config import load_agent_config
+
+            agent_config = load_agent_config(self.agent_id)
+            lcc = agent_config.running.light_context_config
+            divisor = lcc.token_count_estimate_divisor
+            divisor = float(divisor)
+            if divisor > 0:
+                return divisor
+        except Exception:
+            logger.debug(
+                "Failed to load token_count_estimate_divisor for %s",
+                self.agent_id,
+                exc_info=True,
+            )
+        return 4
+
+    @staticmethod
+    def _estimate_message_text_tokens(
+        text: str,
+        estimate_divisor: float,
+    ) -> int:
+        """Estimate context tokens using the shared byte-length heuristic."""
+        if not text:
+            return 0
+        return int(len(text.encode("utf-8")) / estimate_divisor + 0.5)
 
     # pylint: disable=unused-argument
     async def summarize(self, messages: list[Msg], **kwargs) -> str:
@@ -94,37 +255,7 @@ class BaseMemoryManager(ABC):
         return ""
 
     # pylint: disable=unused-argument
-    async def retrieve(
-        self,
-        messages: list[Msg] | Msg,
-        **kwargs,
-    ) -> dict | None:
-        """Retrieve relevant memory based on the given messages.
-
-        NOTE: This method is optional. Subclasses may override this method
-        to implement actual retrieval. Base implementation returns None,
-        indicating no retrieval support or no relevant memory found.
-
-        Args:
-            messages: One or more conversation messages used as the query.
-            **kwargs: Implementation-specific options.
-
-        Returns:
-            Dict with memory context to merge with kwargs, or None if
-            not implemented or no relevant memory found.
-        """
-        return None
-
-    # pylint: disable=unused-argument
-    async def dream(
-        self,
-        *,
-        runner: Any = None,
-        channel_manager: Any = None,
-        agent_id: Optional[str] = None,
-        workspace_dir: Optional[Path] = None,
-        **kwargs,
-    ) -> None:
+    async def dream(self, **kwargs) -> None:
         """Optimize memory files via a background agent pass.
 
         NOTE: This method is optional. Subclasses may override this method
@@ -133,20 +264,6 @@ class BaseMemoryManager(ABC):
 
         Runs a lightweight ReAct agent with file-editing tools to
         consolidate redundant or outdated memory entries.
-
-        The signature mirrors ``run_heartbeat_once`` so cron callbacks
-        can pass the same set of runner-derived values to either entry.
-
-        Args:
-            runner: Agent runner instance (typically supplied by the cron
-                callback).
-            channel_manager: Optional channel manager for dispatching
-                results (reserved for future use).
-            agent_id: Agent ID for loading config. Subclasses may fall
-                back to ``self.agent_id`` when omitted.
-            workspace_dir: Workspace directory used to locate memory
-                files. Subclasses may fall back to ``self.working_dir``
-                when omitted.
         """
         return None
 
@@ -171,20 +288,15 @@ class BaseMemoryManager(ABC):
         """
         return None
 
-    async def summarize_when_compact(
-        self,
-        messages: list[Msg],
-        **kwargs,
-    ) -> None:
-        """Trigger memory summarization when context compaction occurs.
-
-        Called during pre_reasoning after compaction. Implementations should
-        check internal config and schedule a summarize task if appropriate.
-
-        Args:
-            messages: The messages that were compacted.
-        """
-        return None
+    @staticmethod
+    def _build_query(messages: list[Msg]) -> str:
+        for msg in reversed(messages):
+            if msg.role != "user":
+                continue
+            text = (msg.get_text_content() or "").strip()
+            if text:
+                return text[:MAX_QUERY_CHARS]
+        return ""
 
     async def auto_memory(
         self,
@@ -201,6 +313,50 @@ class BaseMemoryManager(ABC):
             all_messages: All conversation messages.
         """
         return None
+
+    @classmethod
+    def _messages_without_auto_memory_search(
+        cls,
+        messages: list[Msg],
+    ) -> list[Msg]:
+        sanitized_messages: list[Msg] = []
+        for msg in messages:
+            sanitized = cls._message_without_auto_memory_search(msg)
+            if sanitized is not None:
+                sanitized_messages.append(sanitized)
+        return sanitized_messages
+
+    @classmethod
+    def message_without_auto_memory_search(cls, msg: Msg) -> Msg | None:
+        """Return ``msg`` with synthetic auto-memory-search blocks removed."""
+        return cls._message_without_auto_memory_search(msg)
+
+    @staticmethod
+    def _auto_memory_search_block_ids(msg: Msg) -> set[str]:
+        metadata = getattr(msg, "metadata", None)
+        if not isinstance(metadata, dict):
+            return set()
+        return set(metadata.get(AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY) or [])
+
+    @classmethod
+    def _message_without_auto_memory_search(cls, msg: Msg) -> Msg | None:
+        block_ids = cls._auto_memory_search_block_ids(msg)
+        if not block_ids:
+            return msg
+
+        kept_blocks = [
+            block
+            for block in msg.get_content_blocks()
+            if getattr(block, "id", "") not in block_ids
+        ]
+        if not kept_blocks:
+            return None
+
+        sanitized = deepcopy(msg)
+        sanitized.content = kept_blocks
+        if isinstance(sanitized.metadata, dict):
+            sanitized.metadata.pop(AUTO_MEMORY_SEARCH_BLOCK_IDS_KEY, None)
+        return sanitized
 
     async def _summarize_worker(self) -> None:
         """Background worker that processes summarize tasks serially."""

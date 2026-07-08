@@ -126,6 +126,30 @@ async def list_channel_types() -> List[str]:
     return list(get_available_channels())
 
 
+@router.get(
+    "/channels/schemas",
+    summary="Get plugin channel config schemas",
+    description=(
+        "Return config_fields metadata for plugin-registered channels "
+        "so the frontend can render dynamic forms."
+    ),
+)
+async def list_channel_schemas() -> dict:
+    """Return plugin channel schemas for frontend form rendering."""
+    from ...plugins.registry import PluginRegistry
+
+    registry = PluginRegistry()
+    result: dict = {}
+    for key, reg in registry.get_registered_channels().items():
+        result[key] = {
+            "label": reg.label,
+            "description": reg.description,
+            "plugin_id": reg.plugin_id,
+            "config_fields": reg.config_fields,
+        }
+    return result
+
+
 @router.put(
     "/channels",
     response_model=ChannelConfig,
@@ -541,6 +565,7 @@ async def put_heartbeat(
         enabled=body.enabled,
         every=body.every,
         target=body.target,
+        timeout_seconds=body.timeout_seconds,
         active_hours=body.active_hours,
     )
     agent.config.heartbeat = hb
@@ -577,16 +602,15 @@ async def run_heartbeat_now(request: Request) -> Any:
     import asyncio
     import logging
 
-    agent = await get_agent_for_request(request)
+    workspace = await get_agent_for_request(request)
 
     async def _run_once_bg() -> None:
         try:
-            workspace_dir = getattr(agent.runner, "workspace_dir", None)
             await run_heartbeat_once(
-                runner=agent.runner,
-                channel_manager=agent.channel_manager,
-                agent_id=agent.agent_id,
-                workspace_dir=workspace_dir,
+                workspace=workspace,
+                channel_manager=workspace.channel_manager,
+                agent_id=workspace.agent_id,
+                workspace_dir=workspace.workspace_dir,
             )
         except Exception as e:  # pylint: disable=broad-except
             logging.getLogger(__name__).exception(

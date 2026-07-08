@@ -15,6 +15,7 @@ import { useEffect } from "react";
 import type { FormInstance } from "antd";
 import { getChannelLabel, type ChannelKey } from "./constants";
 import { QrcodeAuthBlock } from "./QrcodeAuthBlock";
+import type { ChannelSchema } from "../../../../api/modules/channel";
 import styles from "../index.module.less";
 import { useAgentStore } from "../../../../stores/agentStore";
 import { openExternalLink } from "../../../../utils/openExternalLink";
@@ -34,6 +35,7 @@ const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "mqtt",
   "xiaoyi",
   "yuanbao",
+  "slack",
 ];
 
 // Doc EN URLs per channel (anchors on https://qwenpaw.agentscope.io/docs/channels)
@@ -59,6 +61,7 @@ const CHANNEL_DOC_EN_URLS: Partial<Record<ChannelKey, string>> = {
   yuanbao: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Yuanbao",
   onebot:
     "https://qwenpaw.agentscope.io/docs/channels/?lang=en#OneBot-v11-NapCat--QQ-full-protocol",
+  slack: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Slack",
 };
 
 // Doc ZH URLs per channel (anchors on https://qwenpaw.agentscope.io/docs/channels)
@@ -82,6 +85,7 @@ const CHANNEL_DOC_ZH_URLS: Partial<Record<ChannelKey, string>> = {
     "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#腾讯元宝Yuanbao",
   onebot:
     "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#OneBot-v11NapCat--QQ-完整协议",
+  slack: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#Slack",
 };
 
 const TWILIO_CONSOLE_URL = "https://console.twilio.com";
@@ -102,6 +106,7 @@ interface ChannelDrawerProps {
   saving: boolean;
   initialValues: Record<string, unknown> | undefined;
   isBuiltin: boolean;
+  channelSchema?: ChannelSchema;
   onClose: () => void;
   onSubmit: (values: Record<string, unknown>) => void;
 }
@@ -114,6 +119,7 @@ export function ChannelDrawer({
   saving,
   initialValues,
   isBuiltin,
+  channelSchema,
   onClose,
   onSubmit,
 }: ChannelDrawerProps) {
@@ -312,6 +318,9 @@ export function ChannelDrawer({
             >
               <Switch />
             </Form.Item>
+            <Form.Item name="media_dir" label={t("channels.wechatMediaDir")}>
+              <Input placeholder={defaultMediaDir} />
+            </Form.Item>
           </>
         );
 
@@ -432,6 +441,13 @@ export function ChannelDrawer({
                   </>
                 );
               }}
+            </Form.Item>
+            <Form.Item
+              name="endpoint"
+              label={t("channels.dingtalkEndpoint")}
+              tooltip={t("channels.dingtalkEndpointTooltip")}
+            >
+              <Input placeholder="https://api.dingtalk.com" />
             </Form.Item>
             <Form.Item
               name="at_sender_on_reply"
@@ -604,6 +620,9 @@ export function ChannelDrawer({
             >
               <Input.Password placeholder="Telegram bot token from BotFather" />
             </Form.Item>
+            <Form.Item name="base_url" label="API Base URL">
+              <Input placeholder="https://tg-api.yourdomain.com" />
+            </Form.Item>
             <Form.Item name="http_proxy" label="HTTP Proxy">
               <Input placeholder="http://127.0.0.1:18118" />
             </Form.Item>
@@ -616,6 +635,35 @@ export function ChannelDrawer({
               valuePropName="checked"
             >
               <Switch />
+            </Form.Item>
+          </>
+        );
+
+      case "slack":
+        return (
+          <>
+            <Form.Item
+              name="bot_token"
+              label="Bot Token"
+              rules={[{ required: true }]}
+              tooltip={t("channels.slackBotTokenTooltip")}
+            >
+              <Input.Password placeholder="xoxb-..." />
+            </Form.Item>
+            <Form.Item
+              name="app_token"
+              label="App Token"
+              rules={[{ required: true }]}
+              tooltip={t("channels.slackAppTokenTooltip")}
+            >
+              <Input.Password placeholder="xapp-..." />
+            </Form.Item>
+            <Form.Item
+              name="proxy"
+              label="HTTP Proxy"
+              tooltip={t("channels.slackProxyTooltip")}
+            >
+              <Input placeholder="http://127.0.0.1:18118" />
             </Form.Item>
           </>
         );
@@ -1070,9 +1118,6 @@ export function ChannelDrawer({
             >
               <Input placeholder="Agent ID from XiaoYi platform" />
             </Form.Item>
-            <Form.Item name="ws_url" label="WebSocket URL">
-              <Input placeholder="wss://hag.cloud.huawei.com/openclaw/v1/ws/link" />
-            </Form.Item>
           </>
         );
 
@@ -1284,6 +1329,102 @@ export function ChannelDrawer({
   const renderCustomExtraFields = (
     values: Record<string, unknown> | undefined,
   ) => {
+    // If we have a schema from the plugin system, render based on it
+    if (channelSchema && channelSchema.config_fields.length > 0) {
+      return (
+        <>
+          {channelSchema.description && (
+            <div className={styles.schemaDescription}>
+              {channelSchema.description}
+            </div>
+          )}
+          {channelSchema.config_fields.map((field) => {
+            const rules = field.required
+              ? [{ required: true, message: `Please enter ${field.label}` }]
+              : undefined;
+
+            switch (field.type) {
+              case "password":
+                return (
+                  <Form.Item
+                    key={field.name}
+                    name={field.name}
+                    label={field.label}
+                    rules={rules}
+                    tooltip={field.help}
+                    initialValue={field.default}
+                  >
+                    <Input.Password placeholder={field.placeholder} />
+                  </Form.Item>
+                );
+              case "number":
+                return (
+                  <Form.Item
+                    key={field.name}
+                    name={field.name}
+                    label={field.label}
+                    rules={rules}
+                    tooltip={field.help}
+                    initialValue={field.default}
+                  >
+                    <InputNumber
+                      style={{ width: "100%" }}
+                      placeholder={field.placeholder}
+                    />
+                  </Form.Item>
+                );
+              case "switch":
+                return (
+                  <Form.Item
+                    key={field.name}
+                    name={field.name}
+                    label={field.label}
+                    valuePropName="checked"
+                    tooltip={field.help}
+                    initialValue={field.default}
+                  >
+                    <Switch />
+                  </Form.Item>
+                );
+              case "select":
+                return (
+                  <Form.Item
+                    key={field.name}
+                    name={field.name}
+                    label={field.label}
+                    rules={rules}
+                    tooltip={field.help}
+                    initialValue={field.default}
+                  >
+                    <Select
+                      placeholder={field.placeholder}
+                      options={(field.options || []).map((opt) => ({
+                        label: opt,
+                        value: opt,
+                      }))}
+                    />
+                  </Form.Item>
+                );
+              default:
+                return (
+                  <Form.Item
+                    key={field.name}
+                    name={field.name}
+                    label={field.label}
+                    rules={rules}
+                    tooltip={field.help}
+                    initialValue={field.default}
+                  >
+                    <Input placeholder={field.placeholder} />
+                  </Form.Item>
+                );
+            }
+          })}
+        </>
+      );
+    }
+
+    // Fallback: infer field types from existing values (legacy behavior)
     if (!values) return null;
     const extraKeys = Object.keys(values).filter(
       (k) => !BASE_FIELDS.includes(k),
@@ -1439,7 +1580,10 @@ export function ChannelDrawer({
           {(activeKey === "wecom" ||
             activeKey === "telegram" ||
             activeKey === "dingtalk" ||
-            activeKey === "feishu") && (
+            activeKey === "feishu" ||
+            activeKey === "discord" ||
+            activeKey === "slack" ||
+            activeKey === "matrix") && (
             <Form.Item
               name="streaming_enabled"
               label={t("channels.streamingEnabled")}
@@ -1462,6 +1606,18 @@ export function ChannelDrawer({
 
           {CHANNELS_WITH_ACCESS_CONTROL.includes(activeKey) &&
             renderAccessControlFields()}
+
+          {activeKey !== "console" && (
+            <Form.Item
+              name="no_text_debounce"
+              label={t("channels.noTextDebounce")}
+              valuePropName="checked"
+              tooltip={t("channels.noTextDebounceTooltip")}
+              initialValue={true}
+            >
+              <Switch />
+            </Form.Item>
+          )}
         </Form>
       )}
     </Drawer>

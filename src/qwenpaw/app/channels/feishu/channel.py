@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import httpx
-from agentscope_runtime.engine.schemas.agent_schemas import (
+from qwenpaw.schemas import (
     AudioContent,
     FileContent,
     ImageContent,
@@ -174,7 +174,7 @@ finally:
             delattr(_pkg_resources_module, "declare_namespace")
 
 if TYPE_CHECKING:
-    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+    from qwenpaw.schemas import AgentRequest
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +203,7 @@ class FeishuChannel(BaseChannel):
     """
 
     channel = "feishu"
+    _STREAM_DELTA_MIN_INTERVAL_S = FEISHU_STREAM_MIN_INTERVAL_S
 
     def __init__(
         self,
@@ -218,6 +219,7 @@ class FeishuChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         filter_thinking: bool = False,
         dm_policy: str = "open",
         group_policy: str = "open",
@@ -235,6 +237,7 @@ class FeishuChannel(BaseChannel):
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
+            no_text_debounce=no_text_debounce,
             filter_thinking=filter_thinking,
             dm_policy=dm_policy,
             group_policy=group_policy,
@@ -340,6 +343,7 @@ class FeishuChannel(BaseChannel):
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
+        no_text_debounce: bool = True,
         filter_thinking: bool = False,
         workspace_dir: Path | None = None,
     ) -> "FeishuChannel":
@@ -356,6 +360,7 @@ class FeishuChannel(BaseChannel):
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
+            no_text_debounce=no_text_debounce,
             filter_thinking=filter_thinking,
             dm_policy=config.dm_policy or "open",
             group_policy=config.group_policy or "open",
@@ -403,7 +408,7 @@ class FeishuChannel(BaseChannel):
         native_payload: Any,
     ) -> "AgentRequest":
         """Build AgentRequest from Feishu native dict (content_parts)."""
-        from agentscope_runtime.engine.schemas.agent_schemas import (
+        from qwenpaw.schemas import (
             AgentRequest,
         )
 
@@ -680,16 +685,16 @@ class FeishuChannel(BaseChannel):
             while len(self._processed_message_ids) > FEISHU_PROCESSED_IDS_MAX:
                 self._processed_message_ids.popitem(last=False)
 
-            sender_type = getattr(sender, "sender_type", "") or ""
-            if sender_type == "bot":
-                return
-
             sender_id_obj = getattr(sender, "sender_id", None)
             sender_id = ""
             if sender_id_obj and getattr(sender_id_obj, "open_id", None):
                 sender_id = str(getattr(sender_id_obj, "open_id", "")).strip()
             if not sender_id:
                 sender_id = f"unknown_{message_id[:8]}"
+
+            sender_type = getattr(sender, "sender_type", "") or ""
+            if sender_type == "bot" and sender_id == self._bot_open_id:
+                return
 
             nickname = (
                 getattr(sender, "name", None)
@@ -2228,16 +2233,6 @@ class FeishuChannel(BaseChannel):
             )
             return False
 
-    def _is_card_event(self, event: Any) -> bool:
-        """Check if the event matches a registered interactive card kind."""
-        from .cards.context import extract_meta
-
-        meta = extract_meta(event)
-        if meta is None:
-            return False
-        message_type = str(meta.get("message_type") or "")
-        return message_type in self._card_handler._by_message_type
-
     # ------------------------------------------------------------------
     # Streaming hooks (CardKit card mode)
     # ------------------------------------------------------------------
@@ -2300,7 +2295,6 @@ class FeishuChannel(BaseChannel):
             state["cards"][stream_type] = {
                 "card_id": card_info["card_id"],
                 "message_id": card_info["message_id"],
-                "last_update_ts": time.monotonic(),
                 "sequence": 0,
             }
 
@@ -2313,16 +2307,12 @@ class FeishuChannel(BaseChannel):
         stream_type: str,
         accumulated_text: str = "",
     ) -> None:
-        """Stream-update the card with incremental text (throttled)."""
+        """Stream-update the card with incremental text."""
         state = send_meta.get("_fs_stream")
         if not state:
             return
         card_state = state["cards"].get(stream_type)
         if not card_state:
-            return
-
-        now = time.monotonic()
-        if now - card_state["last_update_ts"] < FEISHU_STREAM_MIN_INTERVAL_S:
             return
 
         display_text = self._build_stream_display_text(
@@ -2332,13 +2322,11 @@ class FeishuChannel(BaseChannel):
         )
 
         card_state["sequence"] += 1
-        success = await self._update_streaming_text(
+        await self._update_streaming_text(
             card_state["card_id"],
             display_text,
             sequence=card_state["sequence"],
         )
-        if success:
-            card_state["last_update_ts"] = now
 
     async def on_streaming_end(
         self,
@@ -2394,16 +2382,6 @@ class FeishuChannel(BaseChannel):
         message_id = card_state.get("message_id")
         if message_id:
             send_meta["_last_sent_message_id"] = message_id
-
-        # Card events (e.g. tool_guard) consumed by streaming need a
-        # compact interactive card sent after the streaming card.
-        if stream_type == "message" and self._is_card_event(event):
-            await self._card_handler.try_send_card_for_event(
-                to_handle,
-                event,
-                send_meta,
-                compact=True,
-            )
 
     # ------------------------------------------------------------------
     # Process lifecycle hooks

@@ -7,6 +7,7 @@ export interface BaseChannelConfig {
   group_policy?: "open" | "allowlist";
   allow_from?: string[];
   require_mention?: boolean;
+  no_text_debounce?: boolean;
 }
 
 export interface IMessageChannelConfig extends BaseChannelConfig {
@@ -19,6 +20,8 @@ export interface DiscordConfig extends BaseChannelConfig {
   http_proxy: string;
   http_proxy_auth: string;
   accept_bot_messages?: boolean;
+  streaming_enabled?: boolean;
+  media_dir?: string;
 }
 
 export interface DingTalkConfig extends BaseChannelConfig {
@@ -31,6 +34,7 @@ export interface DingTalkConfig extends BaseChannelConfig {
   robot_code: string;
   at_sender_on_reply?: boolean;
   streaming_enabled?: boolean;
+  endpoint?: string;
 }
 
 export interface FeishuConfig extends BaseChannelConfig {
@@ -53,9 +57,17 @@ export interface QQConfig extends BaseChannelConfig {
 
 export interface TelegramConfig extends BaseChannelConfig {
   bot_token: string;
+  base_url: string;
   http_proxy: string;
   http_proxy_auth: string;
   show_typing?: boolean;
+  streaming_enabled?: boolean;
+}
+
+export interface SlackConfig extends BaseChannelConfig {
+  bot_token: string;
+  app_token: string;
+  proxy?: string;
   streaming_enabled?: boolean;
 }
 
@@ -79,6 +91,7 @@ export interface MatrixConfig extends BaseChannelConfig {
   homeserver: string;
   user_id: string;
   access_token: string;
+  streaming_enabled?: boolean;
 }
 
 export interface MattermostConfig extends BaseChannelConfig {
@@ -141,7 +154,6 @@ export interface XiaoYiConfig extends BaseChannelConfig {
   ak: string;
   sk: string;
   agent_id: string;
-  ws_url: string;
   task_timeout_ms?: number;
 }
 
@@ -176,6 +188,7 @@ export interface ChannelConfig {
   feishu: FeishuConfig;
   qq: QQConfig;
   telegram: TelegramConfig;
+  slack: SlackConfig;
   mqtt: MQTTConfig;
   matrix: MatrixConfig;
   mattermost: MattermostConfig;
@@ -197,6 +210,7 @@ export type SingleChannelConfig =
   | QQConfig
   | ConsoleConfig
   | TelegramConfig
+  | SlackConfig
   | MQTTConfig
   | MatrixConfig
   | MattermostConfig

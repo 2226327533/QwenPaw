@@ -770,18 +770,50 @@ def update_last_dispatch(
     save_config(config)
 
 
+# In-process cache for the current server's API address.
+# Desktop mode uses a random port, and config.json on disk may be
+# overwritten by migrations or file-lock races.  The in-process cache
+# guarantees that tools running in the same process always resolve the
+# correct address without depending on disk I/O.
+#
+# Thread safety: the cache is an immutable tuple assigned atomically under
+# CPython's GIL.  Only the server startup thread calls write_last_api(),
+# so no lock is required for the current single-writer / multi-reader
+# pattern.  If concurrent writers are ever introduced, wrap both
+# read/write in a threading.Lock.
+_runtime_last_api: Optional[Tuple[str, int]] = None
+
+
 def read_last_api() -> Optional[Tuple[str, int]]:
-    """Read last API host/port from config (via config load/save)."""
+    """Read last API host/port, preferring the in-process cache.
+
+    Priority:
+    1. In-process runtime cache (set by ``write_last_api`` in this process)
+    2. Persisted value from config.json on disk
+    """
+    if _runtime_last_api is not None:
+        logger.debug(
+            "read_last_api: using in-process cache %s:%s",
+            _runtime_last_api[0],
+            _runtime_last_api[1],
+        )
+        return _runtime_last_api
+
     config = load_config()
     host = config.last_api.host
     port = config.last_api.port
     if not host or port is None:
+        logger.debug("read_last_api: no value in cache or config")
         return None
+    logger.debug("read_last_api: disk fallback %s:%s", host, port)
     return host, port
 
 
 def write_last_api(host: str, port: int) -> None:
-    """Write last API host/port to config (via config load/save)."""
+    """Write last API host/port to both in-process cache and config file."""
+    global _runtime_last_api
+    _runtime_last_api = (host, port)
+
     config = load_config()
     config.last_api = LastApiConfig(host=host, port=port)
     save_config(config)
@@ -858,3 +890,41 @@ def is_qwenpaw_running() -> bool:
 
     except Exception:
         return False
+
+
+def sanitize_mcp_clients(
+    data: dict,
+    agent_id: str,
+) -> None:
+    """Drop invalid MCP client entries in-place.
+
+    Iterates over ``data["mcp"]["clients"]`` and removes
+    entries that fail ``MCPClientConfig`` validation so that
+    one broken MCP client does not prevent the whole agent
+    from loading.
+    """
+    from .config import MCPClientConfig
+
+    mcp = data.get("mcp")
+    if not isinstance(mcp, dict):
+        return
+    clients = mcp.get("clients")
+    if not isinstance(clients, dict):
+        return
+    bad_keys: list[str] = []
+    for key, val in clients.items():
+        if not isinstance(val, dict):
+            bad_keys.append(key)
+            continue
+        try:
+            MCPClientConfig.model_validate(
+                {**val, "name": key},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"Agent '{agent_id}': skipping invalid "
+                f"MCP client '{key}': {exc}",
+            )
+            bad_keys.append(key)
+    for key in bad_keys:
+        del clients[key]

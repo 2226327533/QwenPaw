@@ -26,6 +26,8 @@ interface EligibleProvider {
   base_url?: string;
   models: ProviderInfo["models"];
   is_free_tier?: boolean;
+  is_custom?: boolean;
+  is_local?: boolean;
   supports_oauth?: boolean;
   oauth_connected?: boolean;
   has_api_key?: boolean;
@@ -69,6 +71,18 @@ export default function ModelSelector() {
   const [expandedModels, setExpandedModels] = useState<Record<string, number>>(
     {},
   );
+
+  // Mobile viewport detection for dropdown placement
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 768px)");
+    const handler = (e: MediaQueryListEvent | MediaQueryList) => {
+      setIsMobile(e.matches);
+    };
+    handler(media);
+    media.addEventListener("change", handler);
+    return () => media.removeEventListener("change", handler);
+  }, []);
 
   // OAuth modal state
   const [oauthModal, setOauthModal] = useState<{
@@ -147,6 +161,8 @@ export default function ModelSelector() {
       base_url: p.base_url,
       models: [...(p.models ?? []), ...(p.extra_models ?? [])],
       is_free_tier: p.is_free_tier,
+      is_custom: p.is_custom,
+      is_local: p.is_local,
       supports_oauth: p.supports_oauth,
       oauth_connected: p.oauth_connected,
       has_api_key: !!p.api_key,
@@ -163,11 +179,14 @@ export default function ModelSelector() {
       if (freeModels.length > 0 || (p.is_free_tier && p.models.length === 0)) {
         freeMap.set(p.id, { ...p, models: freeModels });
       }
-      // PRO: show paid models when API key is configured, or when
-      // the provider doesn't require an API key (e.g. ollama, lmstudio)
+      // PRO: show paid models when API key is configured, provider
+      // doesn't require a key, or provider is user-created / local
       if (
         proModels.length > 0 &&
-        (p.has_api_key || p.require_api_key === false)
+        (p.has_api_key ||
+          p.require_api_key === false ||
+          p.is_custom ||
+          p.is_local)
       ) {
         proMap.set(p.id, { ...p, models: proModels });
       }
@@ -226,6 +245,31 @@ export default function ModelSelector() {
   })();
 
   const showActiveProviderIcon = Boolean(activeProviderId);
+
+  // Marquee the trigger name on very narrow screens when it overflows.
+  const triggerNameRef = useRef<HTMLSpanElement | null>(null);
+  const triggerNameMeasureRef = useRef<HTMLSpanElement | null>(null);
+  const [shouldMarquee, setShouldMarquee] = useState(false);
+
+  useEffect(() => {
+    const check = () => {
+      const w = typeof window !== "undefined" ? window.innerWidth : 0;
+      if (w > 480) {
+        setShouldMarquee(false);
+        return;
+      }
+      const containerWidth =
+        triggerNameRef.current?.getBoundingClientRect().width ?? 0;
+      const textWidth =
+        triggerNameMeasureRef.current?.getBoundingClientRect().width ?? 0;
+      // Small tolerance to avoid borderline jitter.
+      setShouldMarquee(textWidth > containerWidth + 2);
+    };
+
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [activeModelName]);
 
   const handleOpenChange = useCallback(
     async (next: boolean) => {
@@ -298,7 +342,11 @@ export default function ModelSelector() {
       setActiveModels({
         active_llm: { provider_id: providerId, model: modelId },
       });
-      window.dispatchEvent(new CustomEvent("model-switched"));
+      window.dispatchEvent(
+        new CustomEvent("model-switched", {
+          detail: { maxInputLength: targetModel?.max_input_length },
+        }),
+      );
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : t("modelSelector.switchFailed");
@@ -328,7 +376,17 @@ export default function ModelSelector() {
             model: oauthModal.pendingModelId,
           },
         });
-        window.dispatchEvent(new CustomEvent("model-switched"));
+        const oauthProvider = eligibleProviders.find(
+          (p) => p.id === oauthModal.providerId,
+        );
+        const oauthModel = oauthProvider?.models.find(
+          (m) => m.id === oauthModal.pendingModelId,
+        );
+        window.dispatchEvent(
+          new CustomEvent("model-switched", {
+            detail: { maxInputLength: oauthModel?.max_input_length },
+          }),
+        );
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : t("modelSelector.switchFailed");
@@ -677,9 +735,11 @@ export default function ModelSelector() {
       <Dropdown
         open={open}
         onOpenChange={handleOpenChange}
-        popupRender={() => dropdownContent}
+        popupRender={() => (
+          <div style={{ transform: "translateY(0)" }}>{dropdownContent}</div>
+        )}
         trigger={["click"]}
-        placement="bottomLeft"
+        placement={isMobile ? "bottomCenter" : "bottomLeft"}
       >
         <Tooltip title={t("chat.modelSelectTooltip")} mouseEnterDelay={0.5}>
           <div
@@ -693,8 +753,28 @@ export default function ModelSelector() {
             {showActiveProviderIcon && activeProviderId && (
               <ProviderIcon providerId={activeProviderId} size={16} />
             )}
-            <span className={styles.triggerName}>{activeModelName}</span>
-            {open ? <UpOutlined /> : <DownOutlined />}
+            <span className={styles.triggerName} ref={triggerNameRef}>
+              {shouldMarquee ? (
+                <span className={styles.marquee}>{activeModelName}</span>
+              ) : (
+                activeModelName
+              )}
+            </span>
+            {/* Hidden span used to measure intrinsic text width. Placed
+                outside .triggerName so it does not duplicate text for
+                screen readers or testing-library queries. */}
+            <span
+              ref={triggerNameMeasureRef}
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                visibility: "hidden",
+                whiteSpace: "nowrap",
+                pointerEvents: "none",
+              }}
+            >
+              {activeModelName}
+            </span>
           </div>
         </Tooltip>
       </Dropdown>

@@ -1,25 +1,18 @@
-/* Disabled input overlay */
-.chatDisabledOverlay {
-  position: relative;
+/* Chat page root layout */
+.chatPageRoot {
   height: 100%;
   width: 100%;
+  display: flex;
+  flex-direction: row;
 }
 
-.chatDisabledOverlay :global([class*="chat-anywhere-input"]),
-.chatDisabledOverlay :global([class*="chat-input"]),
-.chatDisabledOverlay :global(textarea),
-.chatDisabledOverlay :global(input[type="text"]) {
-  pointer-events: none !important;
-  opacity: 0.5 !important;
-  background-color: #f5f5f5 !important;
-  cursor: not-allowed !important;
-}
-
-.chatDisabledOverlay :global(button[class*="send"]),
-.chatDisabledOverlay :global(button[class*="submit"]) {
-  pointer-events: none !important;
-  opacity: 0.3 !important;
-  cursor: not-allowed !important;
+/* Main chat area (left of history panel) */
+.chatMainArea {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
 /* Chat messages scrollable area */
@@ -36,6 +29,17 @@
       flex: 1;
       display: flex;
       align-items: center;
+    }
+  }
+
+  /* Wide mode: widen bubble list and sender while keeping spacing */
+  &.wideMode :global {
+    .qwenpaw-bubble-list {
+      max-width: none !important;
+    }
+
+    .qwenpaw-chat-anywhere-sender-wrapper {
+      max-width: none !important;
     }
   }
 
@@ -74,6 +78,34 @@
 
   :global(.dark-mode) & {
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  }
+}
+
+/* Right-side history panel */
+.historyPanel {
+  width: 330px;
+  flex-shrink: 0;
+  align-self: stretch;
+  overflow: hidden;
+  position: relative;
+}
+
+@media (max-width: 900px) {
+  .historyPanel {
+    position: fixed;
+    top: 90px;
+    right: 0;
+    bottom: 0;
+    width: min(330px, 85vw);
+    z-index: 1000;
+    box-shadow: -4px 0 12px rgba(0, 0, 0, 0.15);
+    border-radius: 12px 0 0 12px;
+  }
+  .historyPanelMask {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 999;
   }
 }
 
@@ -148,20 +180,10 @@
   }
 }
 
-/* Message actions: hide by default on hover-capable devices, always visible on touch */
-@media (hover: hover) {
-  .chatMessagesArea :global {
-    [class*="bubble-footer"] {
-      opacity: 0;
-      transition: opacity 0.2s;
-    }
-
-    [class*="bubble-end"]:hover [class*="bubble-footer"],
-    [class*="bubble-start"]:hover [class*="bubble-footer"],
-    [class*="bubble-footer"]:hover,
-    [class*="bubble-footer"]:focus-within {
-      opacity: 1;
-    }
+/* Message actions: always visible (timestamps are useful at a glance). */
+.chatMessagesArea :global {
+  [class*="bubble-footer"] {
+    opacity: 1;
   }
 }
 
@@ -175,13 +197,17 @@
   }
 }
 
-/* Dark mode scrollbar for disabled overlay */
-:global(.dark-mode) {
-  .chatDisabledOverlay :global([class*="chat-anywhere-input"]),
-  .chatDisabledOverlay :global([class*="chat-input"]),
-  .chatDisabledOverlay :global(textarea),
-  .chatDisabledOverlay :global(input[type="text"]) {
-    background-color: #2a2a2a !important;
+/* Fix #5480: Assistant response markdown may temporarily fall back to the
+ * vendor Raw renderer while streaming. Raw renders newline-bearing text as
+ * normal div children, so wrap long lines on the host side.
+ */
+.chatMessagesArea :global {
+  [class*="bubble-start"] [class*="markdown"],
+  [class*="bubble-assistant"] [class*="markdown"] {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: normal;
   }
 }
 

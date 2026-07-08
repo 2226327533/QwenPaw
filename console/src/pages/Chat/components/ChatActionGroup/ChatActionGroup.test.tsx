@@ -2,20 +2,27 @@ import { describe, it, expect, vi } from "vitest";
 import { renderWithProviders } from "@/test/common_setup";
 
 // Mock react-window to avoid import errors in mocked ChatSessionDrawer
-vi.mock("react-window", () => ({
-  FixedSizeList: ({ children, itemData, itemCount }: any) => {
-    const Row = children;
+const { MockVariableSizeList } = vi.hoisted(() => {
+  const React = require("react");
+  const MockVariableSizeList = React.forwardRef((props: any, ref: any) => {
+    React.useImperativeHandle(ref, () => ({
+      resetAfterIndex: () => {},
+    }));
+    const Row = props.children;
     return (
       <>
-        {Array.from({ length: itemCount }, (_, i) => (
-          <Row key={i} index={i} style={{}} data={itemData} />
+        {Array.from({ length: props.itemCount }, (_: any, i: number) => (
+          <Row key={i} index={i} style={{}} data={props.itemData} />
         ))}
       </>
     );
-  },
+  });
+  return { MockVariableSizeList };
+});
+vi.mock("react-window", () => ({
+  VariableSizeList: MockVariableSizeList,
 }));
 
-vi.mock("../../ChatSearchPanel", () => ({ default: () => null }));
 vi.mock("../../ChatSessionDrawer", () => ({ default: () => null }));
 
 import ChatActionGroup from "./index";
@@ -25,11 +32,18 @@ describe("ChatActionGroup", () => {
     expect(() => renderWithProviders(<ChatActionGroup />)).not.toThrow();
   });
 
-  it("renders history icon button", () => {
-    renderWithProviders(<ChatActionGroup />);
+  it("renders history icon button when onToggleHistory is provided", () => {
+    renderWithProviders(<ChatActionGroup onToggleHistory={() => {}} />);
     expect(
       document.querySelector('[data-icon="SparkHistoryLine"]'),
     ).toBeInTheDocument();
+  });
+
+  it("does not render history icon button in simple mode (no onToggleHistory)", () => {
+    renderWithProviders(<ChatActionGroup />);
+    expect(
+      document.querySelector('[data-icon="SparkHistoryLine"]'),
+    ).not.toBeInTheDocument();
   });
 
   it("renders new chat icon button", () => {
